@@ -151,14 +151,14 @@ local rungler = {
 -- mid voices (3-5): melodic, moderate motion
 -- high voices (6-8): accents, fast, sparse
 local VOICE_ROLES = {
-  {name="bass",  base_oct=-1, range=12, div=2, density=0.8,  amp_lo=0.22, amp_hi=0.38, gate_len=6},
-  {name="bass",  base_oct=-1, range=14, div=2, density=0.7,  amp_lo=0.20, amp_hi=0.35, gate_len=5},
-  {name="mid",   base_oct=0,  range=19, div=1, density=0.65, amp_lo=0.16, amp_hi=0.32, gate_len=4},
-  {name="mid",   base_oct=0,  range=17, div=1, density=0.6,  amp_lo=0.15, amp_hi=0.30, gate_len=3},
-  {name="mid",   base_oct=0,  range=21, div=1, density=0.55, amp_lo=0.14, amp_hi=0.28, gate_len=3},
-  {name="high",  base_oct=1,  range=14, div=1, density=0.45, amp_lo=0.10, amp_hi=0.22, gate_len=2},
-  {name="high",  base_oct=1,  range=12, div=1, density=0.4,  amp_lo=0.08, amp_hi=0.20, gate_len=2},
-  {name="high",  base_oct=2,  range=10, div=1, density=0.35, amp_lo=0.07, amp_hi=0.18, gate_len=2},
+  {name="bass",  base_oct=-1, range=12, div=2, density=0.8,  amp_lo=0.25, amp_hi=0.55, gate_len=6},
+  {name="bass",  base_oct=-1, range=14, div=2, density=0.7,  amp_lo=0.22, amp_hi=0.50, gate_len=5},
+  {name="mid",   base_oct=0,  range=19, div=1, density=0.65, amp_lo=0.18, amp_hi=0.42, gate_len=4},
+  {name="mid",   base_oct=0,  range=17, div=1, density=0.6,  amp_lo=0.16, amp_hi=0.40, gate_len=3},
+  {name="mid",   base_oct=0,  range=21, div=1, density=0.55, amp_lo=0.15, amp_hi=0.38, gate_len=3},
+  {name="high",  base_oct=1,  range=14, div=1, density=0.45, amp_lo=0.12, amp_hi=0.30, gate_len=2},
+  {name="high",  base_oct=1,  range=12, div=1, density=0.4,  amp_lo=0.10, amp_hi=0.28, gate_len=2},
+  {name="high",  base_oct=2,  range=10, div=1, density=0.35, amp_lo=0.08, amp_hi=0.25, gate_len=2},
 }
 
 -- Motor voice state
@@ -246,10 +246,10 @@ local BANDMATE_STYLES = {
   },
   {
     name = "SWARM",
-    chaos_lo = 0.3,  chaos_hi = 0.55,
-    mass_lo  = 0.08, mass_hi  = 0.4,
-    rough_lo = 0.1,  rough_hi = 0.35,
-    density_lo = 0.6, density_hi = 0.95,
+    chaos_lo = 0.3,  chaos_hi = 0.65,
+    mass_lo  = 0.05, mass_hi  = 0.35,
+    rough_lo = 0.15, rough_hi = 0.6,
+    density_lo = 0.7, density_hi = 1.0,
     evolution_speed   = 0.1,
     scale_change_prob = 0.025,
     reverb_mix_target = 0.25,
@@ -260,10 +260,10 @@ local BANDMATE_STYLES = {
   },
   {
     name = "BLASSER",
-    chaos_lo = 0.55, chaos_hi = 0.9,
-    mass_lo  = 0.15, mass_hi  = 0.6,
-    rough_lo = 0.2,  rough_hi = 0.55,
-    density_lo = 0.35, density_hi = 0.75,
+    chaos_lo = 0.55, chaos_hi = 0.95,
+    mass_lo  = 0.1,  mass_hi  = 0.5,
+    rough_lo = 0.3,  rough_hi = 0.8,
+    density_lo = 0.4, density_hi = 0.9,
     evolution_speed   = 0.08,
     scale_change_prob = 0.05,
     reverb_mix_target = 0.35,
@@ -288,10 +288,10 @@ local BANDMATE_STYLES = {
   },
   {
     name = "RUPTURE",
-    chaos_lo = 0.25, chaos_hi = 0.95,
-    mass_lo  = 0.05, mass_hi  = 0.4,
-    rough_lo = 0.1,  rough_hi = 0.9,
-    density_lo = 0.2, density_hi = 0.85,
+    chaos_lo = 0.3,  chaos_hi = 1.0,
+    mass_lo  = 0.03, mass_hi  = 0.3,
+    rough_lo = 0.2,  rough_hi = 1.0,
+    density_lo = 0.15, density_hi = 1.0,
     evolution_speed   = 0.15,
     scale_change_prob = 0.04,
     reverb_mix_target = 0.2,
@@ -316,10 +316,10 @@ local BANDMATE_STYLES = {
   },
   {
     name = "CLOCKWORK",
-    chaos_lo = 0.15, chaos_hi = 0.5,
-    mass_lo  = 0.05, mass_hi  = 0.25,   -- low mass = snappy, rhythmic
-    rough_lo = 0.1,  rough_hi = 0.35,
-    density_lo = 0.6, density_hi = 0.95,
+    chaos_lo = 0.15, chaos_hi = 0.55,
+    mass_lo  = 0.03, mass_hi  = 0.2,    -- low mass = snappy, rhythmic
+    rough_lo = 0.15, rough_hi = 0.5,
+    density_lo = 0.65, density_hi = 1.0,
     evolution_speed   = 0.04,
     scale_change_prob = 0.02,
     reverb_mix_target = 0.2,             -- dry = rhythmic clarity
@@ -955,12 +955,12 @@ local function bandmate_evolve_timbre()
   end
 
   -- 4. DRIVE: independent from grind, creates its own saturation curve
-  --    Slow drift with occasional spikes
-  local drive_target = 0.1 + math.sin(t * 0.07) * 0.15 + roughness * 0.2
-  if math.random() < 0.02 then
-    drive_target = drive_target + 0.3  -- spike
+  --    Slow drift with occasional heavy spikes
+  local drive_target = 0.1 + math.sin(t * 0.07) * 0.2 + roughness * 0.3
+  if math.random() < 0.04 then
+    drive_target = drive_target + 0.4  -- heavy spike
   end
-  drive_target = util.clamp(drive_target, 0.0, 0.8)
+  drive_target = util.clamp(drive_target, 0.0, 1.0)
   params:set("drive", drive_target, true)
   pcall(function() engine.drive(drive_target) end)
 
@@ -1041,24 +1041,58 @@ local function setup_lattice()
           if step % role.div == 0 and m.on then
             -- Should this voice gate on this step?
             if should_voice_gate(i, rung) then
-              -- New note!
+              -- NEW NOTE — each note is a unique timbral event
               local midi_note = rungler_to_midi(i, rung)
 
-              -- Velocity from rungler + role range
+              -- ---- PER-NOTE TIMBRE from rungler bits ----
+              -- Each voice reads different register bits for independence
+              local shifted = ((rungler.reg >> (i - 1)) | (rungler.reg << (8 - (i - 1)))) & 0xFF
+
+              -- Waveshape: bits 0-2 (8 levels from saw to reverse saw)
+              local note_ws = (shifted & 0x07) / 7.0
+              pcall(function() engine.waveshape_v(i - 1, note_ws) end)
+
+              -- Inertia per-note: bits 3-4 (4 levels: snap/light/medium/heavy)
+              local inertia_bits = (shifted >> 3) & 0x03
+              local note_inertia = ({0.03, 0.12, 0.35, 0.8})[inertia_bits + 1]
+              note_inertia = note_inertia * (0.5 + mass)  -- mass still scales it
+              pcall(function() engine.inertia(i - 1, note_inertia) end)
+              m.inertia = note_inertia
+
+              -- Grind per-note: bit 5 + rungler value
+              local note_grind = ((shifted >> 5) & 0x01) * 0.3 + rung * roughness * 0.4
+              pcall(function() engine.grind_v(i - 1, note_grind) end)
+              m.grind = note_grind
+
+              -- FX send per-note: bits 6-7 (dry/light/medium/drenched)
+              local fx_bits = (shifted >> 6) & 0x03
+              local note_fx = ({0.1, 0.25, 0.45, 0.75})[fx_bits + 1]
+              pcall(function() engine.fx_send(i - 1, note_fx) end)
+
+              -- Phase noise per-note: from rungler value
+              local note_pn = rung * 0.03 + roughness * 0.01
+              pcall(function() engine.phase_noise_v(i - 1, note_pn) end)
+
+              -- Amp lag per-note: bit 2 = snappy or smooth gate
+              local snap = ((shifted >> 2) & 0x01) == 1
+              pcall(function() engine.amp_lag(i - 1, snap and 0.02 or 0.12) end)
+
+              -- ---- VELOCITY: rungler-driven accents ----
+              -- Accent when bits 0+1+2 are all 1 (12.5% probability, patterned not random)
+              local accent = (shifted & 0x07) == 0x07
               local vel_raw = role.amp_lo + rung * (role.amp_hi - role.amp_lo)
-              -- Add accent: occasional louder hits
-              if math.random() < 0.15 then
-                vel_raw = vel_raw * 1.4
-              end
-              m.amp = util.clamp(vel_raw, 0.0, 0.45)
+              if accent then vel_raw = vel_raw * 1.6 end
+              m.amp = util.clamp(vel_raw, 0.0, 0.7)
+
+              -- ---- GATE LENGTH varies: short=staccato, long=legato ----
+              local gate_var = (shifted & 0x03)  -- 0-3 variation
+              m.gate_counter = math.max(1, role.gate_len + gate_var - 1)
 
               -- Set target and gate
               m.target_freq = midi_note
               m.gated = true
-              m.gate_counter = role.gate_len
 
-              -- Send to engine: fast spin-up, then freq+amp
-              gate_on_lag(i)
+              -- Send freq + amp
               local hz = midi_to_hz(midi_note)
               engine.freq(i - 1, hz)
               engine.amp(i - 1, m.amp)

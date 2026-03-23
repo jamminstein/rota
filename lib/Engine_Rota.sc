@@ -203,9 +203,19 @@ Engine_Rota : CroneEngine {
       synths.do { |s| s.set(\waveshape, msg[1]) };
     });
 
+    // Per-voice waveshape
+    this.addCommand("waveshape_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\waveshape, msg[2]);
+    });
+
     // Global phase noise (electromagnetic texture)
     this.addCommand("phase_noise", "f", { |msg|
       synths.do { |s| s.set(\phaseNoise, msg[1]) };
+    });
+
+    // Per-voice phase noise
+    this.addCommand("phase_noise_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\phaseNoise, msg[2]);
     });
 
     // FX: reverb mix
