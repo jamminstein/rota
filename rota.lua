@@ -53,14 +53,14 @@ local rungler = {
 -- mid voices (3-5): melodic, moderate motion
 -- high voices (6-8): accents, fast, sparse
 local VOICE_ROLES = {
-  {name="bass",  base_oct=-1, range=12, div=4, density=0.6,  amp_lo=0.20, amp_hi=0.35, gate_len=4},
-  {name="bass",  base_oct=-1, range=14, div=3, density=0.5,  amp_lo=0.18, amp_hi=0.32, gate_len=3},
-  {name="mid",   base_oct=0,  range=19, div=2, density=0.45, amp_lo=0.15, amp_hi=0.30, gate_len=2},
-  {name="mid",   base_oct=0,  range=17, div=2, density=0.5,  amp_lo=0.14, amp_hi=0.28, gate_len=2},
-  {name="mid",   base_oct=0,  range=21, div=1, density=0.4,  amp_lo=0.12, amp_hi=0.25, gate_len=2},
-  {name="high",  base_oct=1,  range=14, div=1, density=0.3,  amp_lo=0.08, amp_hi=0.20, gate_len=1},
-  {name="high",  base_oct=1,  range=12, div=1, density=0.25, amp_lo=0.06, amp_hi=0.18, gate_len=1},
-  {name="high",  base_oct=2,  range=10, div=2, density=0.2,  amp_lo=0.05, amp_hi=0.15, gate_len=1},
+  {name="bass",  base_oct=-1, range=12, div=2, density=0.8,  amp_lo=0.22, amp_hi=0.38, gate_len=6},
+  {name="bass",  base_oct=-1, range=14, div=2, density=0.7,  amp_lo=0.20, amp_hi=0.35, gate_len=5},
+  {name="mid",   base_oct=0,  range=19, div=1, density=0.65, amp_lo=0.16, amp_hi=0.32, gate_len=4},
+  {name="mid",   base_oct=0,  range=17, div=1, density=0.6,  amp_lo=0.15, amp_hi=0.30, gate_len=3},
+  {name="mid",   base_oct=0,  range=21, div=1, density=0.55, amp_lo=0.14, amp_hi=0.28, gate_len=3},
+  {name="high",  base_oct=1,  range=14, div=1, density=0.45, amp_lo=0.10, amp_hi=0.22, gate_len=2},
+  {name="high",  base_oct=1,  range=12, div=1, density=0.4,  amp_lo=0.08, amp_hi=0.20, gate_len=2},
+  {name="high",  base_oct=2,  range=10, div=1, density=0.35, amp_lo=0.07, amp_hi=0.18, gate_len=2},
 }
 
 -- Motor voice state
@@ -314,13 +314,13 @@ local function should_voice_gate(v_idx, rung_val)
   -- Combine with density and per-role density
   local prob = density * role.density
 
-  -- Gate bit provides the rhythmic structure
+  -- Gate bit provides rhythmic structure
   -- When gate_bit = 1: high probability of sounding
-  -- When gate_bit = 0: low probability (occasional ghost notes)
+  -- When gate_bit = 0: still possible (ghost notes / fills)
   if gate_bit == 1 then
     return math.random() < prob
   else
-    return math.random() < (prob * 0.12)  -- rare ghost notes
+    return math.random() < (prob * 0.25)  -- ghost notes
   end
 end
 
@@ -364,12 +364,18 @@ local function update_globals()
   pcall(function() engine.rolloff(12000 - (roughness * 5000)) end)
 end
 
--- Silence a voice (gate off)
+-- Silence a voice (gate off) — motor spins down with lag
 local function gate_off(i)
   motors[i].gated = false
   motors[i].gate_counter = 0
+  pcall(function() engine.amp_lag(i - 1, 0.3) end)  -- slow spin-down
   pcall(function() engine.amp(i - 1, 0.0) end)
   midi_note_off(i)
+end
+
+-- Gate on — motor spins up
+local function gate_on_lag(i)
+  pcall(function() engine.amp_lag(i - 1, 0.08) end)  -- fast spin-up
 end
 
 -- -----------------------------------------------------------------------
@@ -607,7 +613,8 @@ local function setup_lattice()
               m.gated = true
               m.gate_counter = role.gate_len
 
-              -- Send to engine
+              -- Send to engine: fast spin-up, then freq+amp
+              gate_on_lag(i)
               engine.freq(i - 1, midi_to_hz(midi_note))
               engine.amp(i - 1, m.amp)
 
@@ -1180,9 +1187,9 @@ function init()
   pcall(function() engine.rev_mix(0.35) end)
   pcall(function() engine.rev_time(3.0) end)
 
-  -- Start with just 2 voices: one bass, one mid
+  -- Start with bass + mid voices on (3 voices)
   for i = 1, NUM_VOICES do
-    motors[i].on = (i == 1 or i == 3)
+    motors[i].on = (i <= 3)
     motors[i].amp = 0.0
     motors[i].gated = false
     send_voice(i)
