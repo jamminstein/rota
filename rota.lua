@@ -953,79 +953,132 @@ end
 -- TIMBRE EVOLUTION: independent modulation of waveshape, per-voice grind,
 -- fx_send, drive, rolloff. These move on their OWN curves, not locked to
 -- roughness. This is what creates actual timbral change in nature.
+-- Timbre speed per style: how fast params snap/drift
+-- 0 = slow sine drift, 1 = instant random jumps every tick
+local TIMBRE_SPEED = {
+  0.1,  -- DRIFT: very slow drift
+  0.4,  -- SURGE: moderate, follows surge arc
+  0.7,  -- SWARM: fast, buzzy changes
+  0.8,  -- BLASSER: fast, chaotic
+  0.05, -- GLACIAL: glacial drift
+  0.9,  -- RUPTURE: near-instant jumps
+  0.3,  -- STEREO: moderate
+  0.75, -- CLOCKWORK: snappy, rhythmic
+  0.15, -- FREERUN: slow float
+}
+
 local function bandmate_evolve_timbre()
   local t = bandmate_phase
   local s = get_style()
+  local tspeed = TIMBRE_SPEED[bandmate_style] or 0.3
 
-  -- 1. WAVESHAPE (global): oscillator waveform character
-  --    0=saw (buzzy), 0.5=triangle (soft), 1=reverse saw (nasal)
-  --    Drifts through different timbral zones on its own slow curve
-  --    This is a HUGE timbral shift — saw vs triangle vs reverse saw
-  local ws_base = 0.5 + math.sin(t * 0.11) * 0.45      -- full range sweep
-  local ws_chaos = math.sin(t * 0.67) * chaos * 0.2     -- chaos adds jitter
-  local ws = util.clamp(ws_base + ws_chaos, 0.02, 0.98)
+  -- Decide mode: fast styles use STEP changes, slow use SINE
+  local use_steps = tspeed > 0.5
+
+  -- 1. WAVESHAPE: fast styles snap between zones, slow drift
+  local ws
+  if use_steps then
+    -- Step mode: pick from discrete timbral zones
+    local zones = {0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.95}
+    if math.random() < tspeed * 0.3 then
+      ws = zones[math.random(#zones)]
+    else
+      ws = params:get("waveshape")  -- hold current
+    end
+  else
+    -- Sine mode: slow sweep (but speed scales the rate)
+    local rate = 0.11 + tspeed * 0.5
+    ws = 0.5 + math.sin(t * rate) * 0.45
+    ws = ws + math.sin(t * 0.67) * chaos * 0.2
+  end
+  ws = util.clamp(ws, 0.02, 0.98)
   params:set("waveshape", ws, true)
   pcall(function() engine.waveshape(ws) end)
 
-  -- 2. PER-VOICE GRIND: some voices clean, some gritty
-  --    Creates contrast even within the same register
+  -- 2. PER-VOICE GRIND: fast = random scatter, slow = sine waves
   for i = 1, NUM_VOICES do
-    local voice_grind
-    -- Each voice has its own grind cycle at a prime-ratio rate
-    local rates = {0.11, 0.17, 0.23, 0.29, 0.37, 0.41, 0.43, 0.47}
-    local grind_wave = math.sin(t * rates[i] + i * 1.7)
-
-    if bandmate_style == STYLE_CLOCKWORK then
-      -- CLOCKWORK: uniform grind for consistent texture
-      voice_grind = roughness * 0.8
-    elseif bandmate_style == STYLE_FREERUN then
-      -- FREERUN: very different per voice
-      voice_grind = math.abs(grind_wave) * 0.6
+    local vg
+    if use_steps then
+      -- Random jump between clean and gritty per voice
+      if math.random() < tspeed * 0.25 then
+        vg = math.random() * (roughness + aggression * 0.4)
+      else
+        vg = motors[i].grind  -- hold
+      end
     else
-      -- Other styles: moderate variation centered on roughness
-      voice_grind = roughness * 0.6 + grind_wave * 0.25
+      local rates = {0.11, 0.17, 0.23, 0.29, 0.37, 0.41, 0.43, 0.47}
+      vg = roughness * 0.6 + math.sin(t * rates[i] + i * 1.7) * 0.25
     end
-
-    voice_grind = util.clamp(voice_grind, 0.0, 0.9)
-    motors[i].grind = voice_grind
-    pcall(function() engine.grind_v(i - 1, voice_grind) end)
+    vg = util.clamp(vg + aggression * 0.2, 0.0, 1.0)
+    motors[i].grind = vg
+    pcall(function() engine.grind_v(i - 1, vg) end)
   end
 
-  -- 3. FX SEND breathing: voices move between dry and drenched
-  --    Slow sine, occasionally one voice gets very wet while others stay dry
-  local base_send = 0.3 + math.sin(t * 0.09) * 0.2
+  -- 3. FX SEND: fast = dry/wet snaps, slow = breathing
   for i = 1, NUM_VOICES do
-    local voice_send = base_send + math.sin(t * 0.15 + i * 1.1) * 0.15
-    -- Occasional solo drench: one voice gets maxed send
-    if math.random() < 0.005 then
-      voice_send = 0.8
+    local vs
+    if use_steps then
+      if math.random() < tspeed * 0.2 then
+        -- Snap between dry and wet
+        vs = math.random() < 0.4 and 0.1 or (0.4 + math.random() * 0.4)
+      else
+        vs = 0.3  -- default
+      end
+    else
+      vs = 0.3 + math.sin(t * 0.09) * 0.2
+          + math.sin(t * 0.15 + i * 1.1) * 0.15
     end
-    voice_send = util.clamp(voice_send, 0.1, 0.85)
-    pcall(function() engine.fx_send(i - 1, voice_send) end)
+    -- Aggression dries out
+    vs = vs * (1 - aggression * 0.4)
+    vs = util.clamp(vs, 0.05, 0.85)
+    pcall(function() engine.fx_send(i - 1, vs) end)
   end
 
-  -- 4. DRIVE: independent from grind, creates its own saturation curve
-  --    Slow drift with occasional heavy spikes
-  local drive_target = 0.1 + math.sin(t * 0.07) * 0.2 + roughness * 0.3
-  if math.random() < 0.04 then
-    drive_target = drive_target + 0.4  -- heavy spike
+  -- 4. DRIVE: fast = spikes and drops, slow = gentle wave
+  local drv
+  if use_steps then
+    if math.random() < tspeed * 0.15 then
+      drv = math.random() * 0.7 + aggression * 0.3
+    else
+      drv = params:get("drive")
+    end
+    -- Occasional slam to max
+    if math.random() < tspeed * 0.05 then drv = 0.8 + aggression * 0.2 end
+  else
+    drv = 0.1 + math.sin(t * 0.07) * 0.2 + roughness * 0.3
+    if math.random() < 0.04 then drv = drv + 0.4 end
   end
-  drive_target = util.clamp(drive_target, 0.0, 1.0)
-  params:set("drive", drive_target, true)
-  pcall(function() engine.drive(drive_target) end)
+  drv = util.clamp(drv + aggression * 0.2, 0.0, 1.0)
+  params:set("drive", drv, true)
+  pcall(function() engine.drive(drv) end)
 
-  -- 5. ROLLOFF: independent brightness curve
-  --    Dark moments vs bright moments create huge timbral shifts
-  local brightness = 0.5 + math.sin(t * 0.11) * 0.4
-  -- Chaos makes brightness more volatile
-  brightness = brightness + (math.random() - 0.5) * chaos * 0.2
-  brightness = util.clamp(brightness, 0.1, 1.0)
-  local rolloff_hz = 2000 + brightness * 14000
-  pcall(function() engine.rolloff(rolloff_hz) end)
+  -- 5. ROLLOFF: fast = bright/dark snaps, slow = sweep
+  local rolloff_hz
+  if use_steps then
+    if math.random() < tspeed * 0.2 then
+      -- Snap between dark and bright
+      local zones = {2500, 5000, 8000, 12000, 16000}
+      rolloff_hz = zones[math.random(#zones)]
+    else
+      rolloff_hz = 8000  -- neutral
+    end
+  else
+    local brightness = 0.5 + math.sin(t * 0.11) * 0.4
+    brightness = brightness + (math.random() - 0.5) * chaos * 0.2
+    rolloff_hz = 2000 + util.clamp(brightness, 0.1, 1.0) * 14000
+  end
+  -- Aggression pushes brighter
+  rolloff_hz = rolloff_hz + aggression * 3000
+  pcall(function() engine.rolloff(util.clamp(rolloff_hz, 1500, 18000)) end)
 
-  -- 6. PHASE NOISE: electromagnetic texture, independent evolution
-  local pn = 0.005 + math.sin(t * 0.17) * 0.015 + roughness * 0.02
-  pn = util.clamp(pn, 0.0, 0.06)
+  -- 6. PHASE NOISE: fast = texture jumps, slow = drift
+  local pn
+  if use_steps then
+    pn = math.random() * 0.04 + roughness * 0.02 + aggression * 0.02
+  else
+    pn = 0.005 + math.sin(t * 0.17) * 0.015 + roughness * 0.02
+  end
+  pn = util.clamp(pn, 0.0, 0.08)
   pcall(function() engine.phase_noise(pn) end)
 end
 
@@ -1166,6 +1219,11 @@ local function setup_lattice()
           if m.active_bright > 0 then
             m.active_bright = m.active_bright - 1
           end
+        end
+
+        -- Fast timbre styles: evolve on EVERY step (not just 11/4 ticks)
+        if bandmate_on and (TIMBRE_SPEED[bandmate_style] or 0) > 0.5 then
+          bandmate_evolve_timbre()
         end
 
         -- Update OP-XY CCs every step (smooth slew)
