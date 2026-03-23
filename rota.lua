@@ -795,6 +795,85 @@ local function bandmate_evolve_tempo()
   end
 end
 
+-- TIMBRE EVOLUTION: independent modulation of waveshape, per-voice grind,
+-- fx_send, drive, rolloff. These move on their OWN curves, not locked to
+-- roughness. This is what creates actual timbral change in nature.
+local function bandmate_evolve_timbre()
+  local t = bandmate_phase
+  local s = get_style()
+
+  -- 1. WAVESHAPE (global): oscillator waveform character
+  --    0=saw (buzzy), 0.5=triangle (soft), 1=reverse saw (nasal)
+  --    Drifts through different timbral zones on its own slow curve
+  --    This is a HUGE timbral shift — saw vs triangle vs reverse saw
+  local ws_base = 0.5 + math.sin(t * 0.11) * 0.45      -- full range sweep
+  local ws_chaos = math.sin(t * 0.67) * chaos * 0.2     -- chaos adds jitter
+  local ws = util.clamp(ws_base + ws_chaos, 0.02, 0.98)
+  params:set("waveshape", ws, true)
+  pcall(function() engine.waveshape(ws) end)
+
+  -- 2. PER-VOICE GRIND: some voices clean, some gritty
+  --    Creates contrast even within the same register
+  for i = 1, NUM_VOICES do
+    local voice_grind
+    -- Each voice has its own grind cycle at a prime-ratio rate
+    local rates = {0.11, 0.17, 0.23, 0.29, 0.37, 0.41, 0.43, 0.47}
+    local grind_wave = math.sin(t * rates[i] + i * 1.7)
+
+    if bandmate_style == STYLE_CLOCKWORK then
+      -- CLOCKWORK: uniform grind for consistent texture
+      voice_grind = roughness * 0.8
+    elseif bandmate_style == STYLE_FREERUN then
+      -- FREERUN: very different per voice
+      voice_grind = math.abs(grind_wave) * 0.6
+    else
+      -- Other styles: moderate variation centered on roughness
+      voice_grind = roughness * 0.6 + grind_wave * 0.25
+    end
+
+    voice_grind = util.clamp(voice_grind, 0.0, 0.9)
+    motors[i].grind = voice_grind
+    pcall(function() engine.grind_v(i - 1, voice_grind) end)
+  end
+
+  -- 3. FX SEND breathing: voices move between dry and drenched
+  --    Slow sine, occasionally one voice gets very wet while others stay dry
+  local base_send = 0.3 + math.sin(t * 0.09) * 0.2
+  for i = 1, NUM_VOICES do
+    local voice_send = base_send + math.sin(t * 0.15 + i * 1.1) * 0.15
+    -- Occasional solo drench: one voice gets maxed send
+    if math.random() < 0.005 then
+      voice_send = 0.8
+    end
+    voice_send = util.clamp(voice_send, 0.1, 0.85)
+    pcall(function() engine.fx_send(i - 1, voice_send) end)
+  end
+
+  -- 4. DRIVE: independent from grind, creates its own saturation curve
+  --    Slow drift with occasional spikes
+  local drive_target = 0.1 + math.sin(t * 0.07) * 0.15 + roughness * 0.2
+  if math.random() < 0.02 then
+    drive_target = drive_target + 0.3  -- spike
+  end
+  drive_target = util.clamp(drive_target, 0.0, 0.8)
+  params:set("drive", drive_target, true)
+  pcall(function() engine.drive(drive_target) end)
+
+  -- 5. ROLLOFF: independent brightness curve
+  --    Dark moments vs bright moments create huge timbral shifts
+  local brightness = 0.5 + math.sin(t * 0.11) * 0.4
+  -- Chaos makes brightness more volatile
+  brightness = brightness + (math.random() - 0.5) * chaos * 0.2
+  brightness = util.clamp(brightness, 0.1, 1.0)
+  local rolloff_hz = 2000 + brightness * 14000
+  pcall(function() engine.rolloff(rolloff_hz) end)
+
+  -- 6. PHASE NOISE: electromagnetic texture, independent evolution
+  local pn = 0.005 + math.sin(t * 0.17) * 0.015 + roughness * 0.02
+  pn = util.clamp(pn, 0.0, 0.06)
+  pcall(function() engine.phase_noise(pn) end)
+end
+
 local function bandmate_evolve_reverb()
   local s = get_style()
   local cur_mix = params:get("rev_mix")
@@ -927,6 +1006,7 @@ local function setup_lattice()
         if bandmate_on then
           bandmate_update_inertia()
           bandmate_evolve_params()
+          bandmate_evolve_timbre()
         end
       end)
     end,
