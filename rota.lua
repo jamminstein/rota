@@ -574,8 +574,50 @@ local gate_patterns = {
 }
 local gate_pattern_len = 8
 local gate_pattern_pos = 0  -- current position in pattern
-local gate_mode = 1  -- 1=FREE (rungler gates), 2=PATTERN (uses gate_patterns), 3=EUCLIDEAN
-local GATE_MODES = {"FREE", "PATTERN", "EUCLID"}
+local gate_mode = 1
+local GATE_MODES = {"FREE", "PATTERN", "EUCLID", "BURST", "POLYMET", "STUTTER", "TIDAL"}
+
+-- -----------------------------------------------------------------------
+-- RADICAL GATE MODES 4-7
+-- -----------------------------------------------------------------------
+
+-- BURST: voices fire in rapid bursts then go silent
+-- Each voice has its own burst state
+local burst = {}
+for i = 1, 8 do
+  burst[i] = {
+    firing = false,     -- currently in a burst
+    count = 0,          -- notes remaining in burst
+    rest = 0,           -- steps remaining in rest
+    burst_len = 3,      -- how many notes per burst
+    rest_len = 8,       -- how many steps of silence between bursts
+  }
+end
+
+-- POLYMETRIC: each voice has its own meter (3,4,5,7,8,11,13,16)
+local polymeters = {3, 4, 5, 7, 8, 11, 13, 16}
+
+-- STUTTER: rapid-fire retriggering with decaying amplitude
+local stutter = {
+  active = {},          -- which voices are stuttering
+  count = {},           -- remaining stutters
+  decay = 0.8,         -- amplitude decay per stutter
+}
+for i = 1, 8 do stutter.active[i] = false; stutter.count[i] = 0 end
+
+-- TIDAL: sine/square/saw LFOs gate voices at different rates
+-- Each voice has its own LFO for gating
+local tidal = {
+  lfo_phase = {},       -- current phase per voice
+  lfo_rate = {},        -- rate per voice (prime ratios for polyrhythm)
+  lfo_shape = {},       -- 1=sine, 2=square, 3=saw, 4=random
+  threshold = 0.3,      -- gate threshold (below = silent)
+}
+for i = 1, 8 do
+  tidal.lfo_phase[i] = math.random() * 6.28
+  tidal.lfo_rate[i] = ({0.7, 1.1, 1.5, 2.3, 3.1, 4.7, 5.3, 7.1})[i]
+  tidal.lfo_shape[i] = ((i - 1) % 4) + 1
+end
 
 -- Euclidean parameters per voice
 local euclid_hits = {5, 3, 4, 6, 3, 2, 4, 5}
@@ -1093,14 +1135,104 @@ local function should_voice_gate(v_idx, rung_val)
     return math.random() < prob
   end
 
+  -- BURST mode: rapid bursts then silence
+  if gate_mode == 4 then
+    local b = burst[v_idx]
+    if b.firing then
+      b.count = b.count - 1
+      if b.count <= 0 then
+        b.firing = false
+        b.rest = b.rest_len + math.random(0, 4)
+      end
+      return true  -- always fire during burst
+    else
+      b.rest = b.rest - 1
+      if b.rest <= 0 then
+        -- Start new burst
+        b.firing = true
+        b.burst_len = 2 + math.floor(math.random() * 6 * density)
+        b.count = b.burst_len
+        -- Randomize burst/rest lengths based on chaos
+        b.rest_len = math.floor(4 + (1 - chaos) * 16)
+        return true
+      end
+      return false
+    end
+  end
+
+  -- POLYMETRIC mode: each voice has its own time signature
+  if gate_mode == 5 then
+    local meter = polymeters[v_idx]
+    local on_beat = (gate_pattern_pos % meter) == 0
+    if on_beat then
+      return math.random() < prob
+    else
+      -- Off-beat ghost notes based on chaos
+      return math.random() < (prob * chaos * 0.3)
+    end
+  end
+
+  -- STUTTER mode: rapid retriggering with decay
+  if gate_mode == 6 then
+    local s = stutter
+    if s.active[v_idx] then
+      s.count[v_idx] = s.count[v_idx] - 1
+      if s.count[v_idx] <= 0 then
+        s.active[v_idx] = false
+      end
+      return true  -- keep firing
+    else
+      -- Chance to start a stutter burst
+      if math.random() < prob * 0.15 then
+        s.active[v_idx] = true
+        s.count[v_idx] = 3 + math.floor(math.random() * 8 * density)
+        return true
+      end
+      -- Normal gating between stutters
+      return gate_bit == 1 and math.random() < (prob * 0.5)
+    end
+  end
+
+  -- TIDAL mode: LFO-gated, each voice has its own wave
+  if gate_mode == 7 then
+    local phase = tidal.lfo_phase[v_idx]
+    local rate = tidal.lfo_rate[v_idx]
+    local shape = tidal.lfo_shape[v_idx]
+
+    -- Advance LFO phase
+    tidal.lfo_phase[v_idx] = phase + rate * 0.15
+
+    -- Calculate LFO value (0..1)
+    local lfo_val
+    if shape == 1 then
+      -- Sine
+      lfo_val = (math.sin(phase) + 1) * 0.5
+    elseif shape == 2 then
+      -- Square
+      lfo_val = math.sin(phase) > 0 and 1.0 or 0.0
+    elseif shape == 3 then
+      -- Saw
+      lfo_val = (phase % 6.28) / 6.28
+    else
+      -- Random (sample and hold)
+      if math.floor(phase * rate) ~= math.floor((phase - rate * 0.15) * rate) then
+        tidal.lfo_phase[v_idx] = phase  -- hold phase for S&H
+        lfo_val = math.random()
+      else
+        lfo_val = (math.sin(phase * 0.3) + 1) * 0.5
+      end
+    end
+
+    -- Gate when LFO exceeds threshold (threshold modulated by density)
+    local thresh = tidal.threshold * (1.3 - density)
+    return lfo_val > thresh
+  end
+
   -- FREE mode (default): rungler bits gate
-  -- Gate bit provides rhythmic structure
-  -- When gate_bit = 1: high probability of sounding
-  -- When gate_bit = 0: still possible (ghost notes / fills)
   if gate_bit == 1 then
     return math.random() < prob
   else
-    return math.random() < (prob * 0.25)  -- ghost notes
+    return math.random() < (prob * 0.25)
   end
 end
 
@@ -1890,6 +2022,19 @@ local function setup_lattice()
               -- Aggression boosts amp and makes accents harder
               vel_raw = vel_raw * (1 + aggression * 0.6)
               if accent then vel_raw = vel_raw * (1.4 + aggression * 0.4) end
+
+              -- STUTTER decay: each retrigger gets quieter
+              if gate_mode == 6 and stutter.active[i] then
+                local remaining = stutter.count[i]
+                local total = remaining + (3 + math.floor(density * 8))
+                vel_raw = vel_raw * (stutter.decay ^ (total - remaining))
+              end
+
+              -- BURST: first note of burst is accented
+              if gate_mode == 4 and burst[i].count == burst[i].burst_len then
+                vel_raw = vel_raw * 1.4
+              end
+
               m.amp = util.clamp(vel_raw, 0.0, 0.85)
 
               -- ---- GATE LENGTH varies: short=staccato, long=legato ----
@@ -2290,6 +2435,28 @@ function enc(n, d)
         for i = 1, NUM_VOICES do
           euclid_hits[i] = util.clamp(euclid_hits[i] + d, 0, gate_pattern_len)
         end
+      elseif gate_mode == 4 then
+        -- BURST: E3 adjusts burst length
+        for i = 1, NUM_VOICES do
+          burst[i].burst_len = util.clamp(burst[i].burst_len + d, 1, 12)
+        end
+      elseif gate_mode == 5 then
+        -- POLYMET: E3 rotates meters assignment
+        if d > 0 then
+          local last = polymeters[8]
+          for i = 8, 2, -1 do polymeters[i] = polymeters[i-1] end
+          polymeters[1] = last
+        else
+          local first = polymeters[1]
+          for i = 1, 7 do polymeters[i] = polymeters[i+1] end
+          polymeters[8] = first
+        end
+      elseif gate_mode == 6 then
+        -- STUTTER: E3 adjusts decay rate
+        stutter.decay = util.clamp(stutter.decay + d * 0.02, 0.3, 0.98)
+      elseif gate_mode == 7 then
+        -- TIDAL: E3 adjusts LFO threshold
+        tidal.threshold = util.clamp(tidal.threshold + d * 0.02, 0.05, 0.9)
       end
     end
   end
@@ -2391,6 +2558,34 @@ function key(n, z)
           -- EUCLID: randomize rotations
           for i = 1, NUM_VOICES do
             euclid_rotation[i] = math.random(0, gate_pattern_len - 1)
+          end
+        elseif gate_mode == 4 then
+          -- BURST: randomize burst/rest lengths
+          for i = 1, NUM_VOICES do
+            burst[i].burst_len = 1 + math.random(8)
+            burst[i].rest_len = 3 + math.random(12)
+            burst[i].firing = false
+            burst[i].rest = math.random(0, 4)
+          end
+        elseif gate_mode == 5 then
+          -- POLYMET: shuffle meters
+          for i = 1, NUM_VOICES do
+            local j = math.random(1, NUM_VOICES)
+            polymeters[i], polymeters[j] = polymeters[j], polymeters[i]
+          end
+        elseif gate_mode == 6 then
+          -- STUTTER: reset all stutters and randomize decay
+          for i = 1, NUM_VOICES do
+            stutter.active[i] = false
+            stutter.count[i] = 0
+          end
+          stutter.decay = 0.5 + math.random() * 0.4
+        elseif gate_mode == 7 then
+          -- TIDAL: randomize LFO rates and shapes
+          for i = 1, NUM_VOICES do
+            tidal.lfo_rate[i] = 0.3 + math.random() * 7
+            tidal.lfo_shape[i] = math.random(1, 4)
+            tidal.lfo_phase[i] = math.random() * 6.28
           end
         end
       end
@@ -2846,15 +3041,14 @@ local function draw_page_rhythm()
   screen.move(50, 18)
   screen.text(GATE_MODES[gate_mode])
 
+  -- E3 hint depends on mode
   screen.level(4)
   screen.move(80, 18)
-  if gate_mode == 1 then
-    screen.text("E3 density")
-  elseif gate_mode == 2 then
-    screen.text("E3 preset")
-  else
-    screen.text("E3 hits")
-  end
+  local e3_hints = {
+    "E3 density", "E3 rotate", "E3 hits",
+    "E3 burst", "E3 meters", "E3 decay", "E3 thresh"
+  }
+  screen.text(e3_hints[gate_mode] or "E3")
 
   -- K hints
   screen.level(3)
@@ -2862,13 +3056,11 @@ local function draw_page_rhythm()
   screen.font_size(7)
   screen.text("K2 " .. (playing and "stop" or "play"))
   screen.move(126, 63)
-  if gate_mode == 1 then
-    screen.text_right("K3 rnd density")
-  elseif gate_mode == 2 then
-    screen.text_right("K3 rnd patterns")
-  else
-    screen.text_right("K3 rnd rotations")
-  end
+  local k3_hints = {
+    "K3 rnd dens", "K3 rnd pat", "K3 rnd rot",
+    "K3 rnd burst", "K3 shuffle", "K3 reset", "K3 rnd lfo"
+  }
+  screen.text_right(k3_hints[gate_mode] or "K3")
 
   -- Pattern visualization: 8 columns x 8 rows
   local col_w = 14
@@ -2886,16 +3078,35 @@ local function draw_page_rhythm()
       local is_active = false
 
       if gate_mode == 2 then
-        -- PATTERN mode: show pattern
+        -- PATTERN: show pattern
         local pat = gate_patterns[i]
         is_active = (pat and pat[step + 1] == 1)
       elseif gate_mode == 3 then
-        -- EUCLID mode: compute euclidean pattern
+        -- EUCLID: compute euclidean pattern
         local hits = util.clamp(euclid_hits[i] or 4, 0, gate_pattern_len)
         local rot = euclid_rotation[i] or 0
         is_active = euclidean_gate(hits, gate_pattern_len, rot, step)
+      elseif gate_mode == 4 then
+        -- BURST: show burst/rest zones
+        is_active = burst[i].firing or (step % (burst[i].burst_len + burst[i].rest_len) < burst[i].burst_len)
+      elseif gate_mode == 5 then
+        -- POLYMET: show meter hits
+        is_active = (step % polymeters[i]) == 0
+      elseif gate_mode == 6 then
+        -- STUTTER: show stutter state
+        is_active = stutter.active[i] or ((step % 4) == 0)
+      elseif gate_mode == 7 then
+        -- TIDAL: show LFO wave approximation
+        local ph = (step / gate_pattern_len) * 6.28
+        local shape = tidal.lfo_shape[i]
+        local val
+        if shape == 1 then val = (math.sin(ph * tidal.lfo_rate[i]) + 1) * 0.5
+        elseif shape == 2 then val = math.sin(ph * tidal.lfo_rate[i]) > 0 and 1 or 0
+        elseif shape == 3 then val = (ph * tidal.lfo_rate[i] % 6.28) / 6.28
+        else val = math.random() end
+        is_active = val > tidal.threshold
       else
-        -- FREE mode: show rungler bit state per voice
+        -- FREE: show rungler bit state
         local gate_bit = (rungler.reg >> ((i - 1) % 8)) & 1
         is_active = (gate_bit == 1)
       end
@@ -2916,12 +3127,21 @@ local function draw_page_rhythm()
       end
     end
 
-    -- Euclid hits/len below columns
+    -- Mode-specific info below columns
+    screen.level(6)
+    screen.move(cx - 3, 58)
+    screen.font_size(7)
     if gate_mode == 3 then
-      screen.level(6)
-      screen.move(cx - 3, 58)
-      screen.font_size(7)
       screen.text(tostring(util.clamp(euclid_hits[i] or 4, 0, gate_pattern_len)))
+    elseif gate_mode == 4 then
+      screen.text(burst[i].firing and "!" or tostring(burst[i].burst_len))
+    elseif gate_mode == 5 then
+      screen.text(tostring(polymeters[i]))
+    elseif gate_mode == 6 then
+      screen.text(stutter.active[i] and "~" or ".")
+    elseif gate_mode == 7 then
+      local shapes = {"S", "Q", "W", "R"}
+      screen.text(shapes[tidal.lfo_shape[i]])
     end
 
     -- Voice number label at top of column
