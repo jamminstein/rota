@@ -1215,17 +1215,18 @@ end
 
 function enc(n, d)
   if n == 1 then
-    -- E1: page navigation
+    -- E1: page navigation (always)
     current_page = util.clamp(current_page + d, 1, NUM_PAGES)
 
   elseif current_page == 1 then
-    -- MOTORS: E2=density, E3=rungler speed
+    -- MOTORS: E2=density, E3=roughness/grind
     if n == 2 then
       density = util.clamp(density + d * 0.02, 0.0, 1.0)
       params:set("density", density, true)
     elseif n == 3 then
-      rungler.speed = util.clamp(rungler.speed * (1 + d * 0.05), 0.125, 8.0)
-      params:set("rungler_speed", rungler.speed, true)
+      roughness = util.clamp(roughness + d * 0.02, 0.0, 1.0)
+      params:set("roughness", roughness, true)
+      update_globals()
     end
 
   elseif current_page == 2 then
@@ -1241,7 +1242,7 @@ function enc(n, d)
     end
 
   elseif current_page == 3 then
-    -- SPACE: E2=reverb (mix+size+time), E3=distortion (drive+waveshape+grind)
+    -- SPACE: E2=reverb macro, E3=distortion macro
     if n == 2 then
       local rm = util.clamp(params:get("rev_mix") + d * 0.02, 0, 1)
       local rt = util.clamp(params:get("rev_time") + d * 0.2, 0.5, 12)
@@ -1253,7 +1254,7 @@ function enc(n, d)
       pcall(function() engine.rev_time(rt) end)
       pcall(function() engine.rev_size(rs) end)
     elseif n == 3 then
-      -- Distortion macro: drive + waveshape + grind move together
+      -- Distortion macro: drive + waveshape + grind
       local drv = util.clamp(params:get("drive") + d * 0.02, 0, 1)
       local ws = util.clamp(params:get("waveshape") + d * 0.015, 0, 1)
       roughness = util.clamp(roughness + d * 0.015, 0, 1)
@@ -1287,28 +1288,93 @@ function key(n, z)
     if z == 1 then
       key2_down_time = util.time()
     else
+      -- KEY2 release: short = page action, long = cycle bandmate style
       if key2_down_time then
         local dur = util.time() - key2_down_time
         if dur > 0.5 then
+          -- Long press: cycle bandmate style (all pages)
           bandmate_style = (bandmate_style % #BANDMATE_STYLES) + 1
           params:set("bandmate_style", bandmate_style, true)
         else
-          bandmate_on = not bandmate_on
-          params:set("bandmate_on", bandmate_on and 2 or 1, true)
-          if bandmate_on then
-            for i = 1, NUM_VOICES do
-              motors[i].on = (i <= 3) or (math.random() < 0.3)
+          -- Short press: page-specific action
+          if current_page == 1 then
+            -- MOTORS: toggle bandmate on/off
+            bandmate_on = not bandmate_on
+            params:set("bandmate_on", bandmate_on and 2 or 1, true)
+            if bandmate_on then
+              for i = 1, NUM_VOICES do
+                motors[i].on = (i <= 3) or (math.random() < 0.3)
+              end
+            end
+          elseif current_page == 2 then
+            -- RUNGLER: toggle quantize
+            quantize = not quantize
+            params:set("quantize", quantize and 1 or 0, true)
+          elseif current_page == 3 then
+            -- SPACE: toggle fx send high/low (drench/dry)
+            local fxs = params:get("fx_send")
+            if fxs > 0.5 then
+              params:set("fx_send", 0.15, true)
+              pcall(function() engine.fx_send_all(0.15) end)
+            else
+              params:set("fx_send", 0.75, true)
+              pcall(function() engine.fx_send_all(0.75) end)
+            end
+          elseif current_page == 4 then
+            -- CHAOS: toggle bandmate on/off
+            bandmate_on = not bandmate_on
+            params:set("bandmate_on", bandmate_on and 2 or 1, true)
+            if bandmate_on then
+              for i = 1, NUM_VOICES do
+                motors[i].on = (i <= 3) or (math.random() < 0.3)
+              end
             end
           end
         end
         key2_down_time = nil
       end
     end
-  elseif n == 3 and z == 1 then
-    rungler.reg = math.random(1, 255)
-    rungler.value = 0
-    for i = 1, NUM_VOICES do
-      motors[i].pitch_offset = math.random(-4, 4)
+
+  elseif n == 3 then
+    if z == 1 then
+      -- KEY3 press: page-specific action
+      if current_page == 1 then
+        -- MOTORS: randomize which voices are on
+        for i = 1, NUM_VOICES do
+          motors[i].on = math.random() < density
+          if not motors[i].on then gate_off(i) end
+        end
+        -- Ensure at least 1
+        if not motors[1].on then motors[1].on = true end
+      elseif current_page == 2 then
+        -- RUNGLER: reseed (original K3 behavior)
+        rungler.reg = math.random(1, 255)
+        rungler.value = 0
+        for i = 1, NUM_VOICES do
+          motors[i].pitch_offset = math.random(-4, 4)
+        end
+      elseif current_page == 3 then
+        -- SPACE: randomize timbre (waveshape + grind + drive)
+        local ws = math.random() * 0.8 + 0.1
+        local drv = math.random() * 0.5
+        roughness = math.random() * 0.6
+        params:set("waveshape", ws, true)
+        params:set("drive", drv, true)
+        params:set("roughness", roughness, true)
+        pcall(function() engine.waveshape(ws) end)
+        pcall(function() engine.drive(drv) end)
+        update_globals()
+        -- Per-voice grind scatter
+        for i = 1, NUM_VOICES do
+          motors[i].grind = math.random() * 0.5
+          pcall(function() engine.grind_v(i - 1, motors[i].grind) end)
+        end
+      elseif current_page == 4 then
+        -- CHAOS: cycle scale
+        scale_idx = (scale_idx % #SCALES) + 1
+        params:set("scale", scale_idx, true)
+        rebuild_scale()
+      end
     end
   end
   screen_dirty = true
@@ -1387,26 +1453,29 @@ end
 
 -- PAGE 1: MOTORS — the 8 motor bars, performance view
 local function draw_page_motors()
-  -- E2=density  E3=speed
+  -- Hints
   screen.level(4)
   screen.move(2, 18)
   screen.font_size(8)
   screen.text("E2 density")
   screen.move(68, 18)
-  screen.text("E3 speed")
+  screen.text("E3 grind")
 
-  -- Density + speed values
+  -- Values
   screen.level(12)
   screen.move(2, 27)
   screen.font_size(8)
   screen.text(string.format("%.0f%%", density * 100))
   screen.move(68, 27)
-  screen.text(string.format("%.2fx", rungler.speed))
+  screen.text(string.format("%.0f%%", roughness * 100))
 
-  -- Scale name
-  screen.level(5)
-  screen.move(110, 27)
+  -- K2/K3 hints + scale
+  screen.level(3)
+  screen.move(2, 34)
   screen.font_size(7)
+  screen.text("K2 bandmate  K3 revoice")
+  screen.level(5)
+  screen.move(110, 34)
   screen.text_right(SCALES[scale_idx])
 
   -- Motor bars across bottom
@@ -1461,13 +1530,20 @@ end
 
 -- PAGE 2: RUNGLER — big visualization
 local function draw_page_rungler()
-  -- E2=chaos  E3=speed
   screen.level(4)
   screen.move(2, 18)
   screen.font_size(8)
   screen.text("E2 chaos")
   screen.move(68, 18)
   screen.text("E3 speed")
+
+  -- K hints
+  screen.level(3)
+  screen.move(2, 63)
+  screen.font_size(7)
+  screen.text("K2 quantize:" .. (quantize and "ON" or "OFF"))
+  screen.move(126, 63)
+  screen.text_right("K3 reseed")
 
   -- Large rungler circle (centered)
   local cx = 64
@@ -1527,13 +1603,21 @@ end
 
 -- PAGE 3: SPACE — reverb and distortion
 local function draw_page_space()
-  -- E2=reverb  E3=distortion
   screen.level(4)
   screen.move(2, 18)
   screen.font_size(8)
   screen.text("E2 reverb")
   screen.move(68, 18)
   screen.text("E3 distort")
+
+  -- K hints
+  screen.level(3)
+  screen.move(2, 63)
+  screen.font_size(7)
+  local fxs = params:get("fx_send")
+  screen.text("K2 " .. (fxs > 0.5 and "drench" or "dry"))
+  screen.move(126, 63)
+  screen.text_right("K3 rnd timbre")
 
   -- LEFT: reverb column
   local rev_mix = params:get("rev_mix")
@@ -1588,12 +1672,18 @@ local function draw_page_space()
   screen.move(100, 47)
   screen.text(string.format("%.0f%%", roughness * 100))
 
-  -- FX send bar at bottom
-  draw_bar("FX SEND", fxs, 2, 60, 60, 3)
+  -- FX send
+  screen.level(6)
+  screen.move(2, 56)
+  screen.font_size(7)
+  screen.text("FX SEND")
+  screen.level(12)
+  screen.move(42, 56)
+  screen.text(string.format("%.0f%%", fxs * 100))
 
-  -- Reverb viz: concentric rings (bottom right)
+  -- Reverb viz: concentric rings (right side)
   local rcx = 108
-  local rcy = 58
+  local rcy = 50
   local rings = math.floor(rev_size * 2) + 1
   for r = 1, rings do
     local rr = 2 + r * 3
@@ -1605,7 +1695,6 @@ end
 
 -- PAGE 4: CHAOS — the big three params + density
 local function draw_page_chaos()
-  -- E2=chaos  E3=mass
   screen.level(4)
   screen.move(2, 18)
   screen.font_size(8)
@@ -1613,18 +1702,25 @@ local function draw_page_chaos()
   screen.move(68, 18)
   screen.text("E3 mass")
 
+  -- K hints
+  screen.level(3)
+  screen.move(2, 63)
+  screen.font_size(7)
+  screen.text("K2 bandmate")
+  screen.move(126, 63)
+  screen.text_right("K3 scale:" .. SCALES[scale_idx])
+
   -- Large param displays (2x2 grid)
   draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 30)
   draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 30)
   draw_big_param("GRIND", roughness * 100, "%.0f%%", 4, 50)
   draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 50)
 
-  -- Scale at bottom
+  -- Root note display
   screen.level(5)
-  screen.move(64, 63)
+  screen.move(64, 56)
   screen.font_size(7)
-  screen.text_center(SCALES[scale_idx] .. " / " ..
-    musicutil.note_num_to_name(scale_root, false))
+  screen.text_center("root: " .. musicutil.note_num_to_name(scale_root, true))
 end
 
 function redraw()
