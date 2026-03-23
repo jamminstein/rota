@@ -424,11 +424,17 @@ local function send_voice(i)
   pcall(function() engine.grind_v(i - 1, m.grind) end)
 end
 
+-- Update engine globals from roughness.
+-- When bandmate is active, drive/rolloff/phase_noise are managed by
+-- bandmate_evolve_timbre independently, so we only set grind here.
 local function update_globals()
   pcall(function() engine.grind(roughness) end)
-  pcall(function() engine.phase_noise(roughness * 0.04) end)
-  pcall(function() engine.drive(0.1 + roughness * 0.3) end)
-  pcall(function() engine.rolloff(12000 - (roughness * 5000)) end)
+  if not bandmate_on then
+    -- Manual mode: derive everything from roughness
+    pcall(function() engine.phase_noise(roughness * 0.04) end)
+    pcall(function() engine.drive(0.1 + roughness * 0.3) end)
+    pcall(function() engine.rolloff(12000 - (roughness * 5000)) end)
+  end
 end
 
 -- Silence a voice (gate off) — motor spins down with lag
@@ -1081,20 +1087,23 @@ local function grid_redraw()
       end
     end
 
-    -- Row 8: controls
+    -- Row 8: [bandmate] [quantize] [styles 1-9...] [density] [page2]
     g:led(1, 8, bandmate_on and BRIGHT.FULL or BRIGHT.DIM)
     g:led(2, 8, quantize and BRIGHT.BRIGHT or BRIGHT.DIM)
-    if bandmate_on then
-      for i = 3, 2 + bandmate_style do
-        if i <= 8 then g:led(i, 8, BRIGHT.MID) end
+    -- Styles: cols 3-11 (9 styles)
+    for i = 1, #BANDMATE_STYLES do
+      local col = i + 2
+      if col <= 16 then
+        g:led(col, 8, (bandmate_on and i == bandmate_style) and BRIGHT.FULL
+          or (bandmate_on and BRIGHT.DIM or BRIGHT.GHOST))
       end
     end
-    -- Density indicator: cols 10-16
-    local dens_leds = math.floor(density * 7)
-    for i = 1, 7 do
-      g:led(9 + i, 8, i <= dens_leds and BRIGHT.MID or BRIGHT.GHOST)
+    -- Density: cols 13-15
+    local dens_leds = math.floor(density * 3)
+    for i = 1, 3 do
+      g:led(12 + i, 8, i <= dens_leds and BRIGHT.MID or BRIGHT.GHOST)
     end
-    g:led(16, 8, BRIGHT.MID)
+    g:led(16, 8, BRIGHT.MID)  -- page 2
 
   elseif grid_page == 2 then
     for i = 1, NUM_VOICES do
@@ -1176,7 +1185,8 @@ local function grid_key(x, y, z)
       elseif x == 2 then
         quantize = not quantize
         params:set("quantize", quantize and 1 or 0, true)
-      elseif x >= 3 and x <= 8 then
+      elseif x >= 3 and x <= 11 then
+        -- Cols 3-11 = styles 1-9
         local sn = x - 2
         if sn <= #BANDMATE_STYLES then
           bandmate_style = sn
@@ -1537,14 +1547,6 @@ local function draw_page_rungler()
   screen.move(68, 18)
   screen.text("E3 speed")
 
-  -- K hints
-  screen.level(3)
-  screen.move(2, 63)
-  screen.font_size(7)
-  screen.text("K2 quantize:" .. (quantize and "ON" or "OFF"))
-  screen.move(126, 63)
-  screen.text_right("K3 reseed")
-
   -- Large rungler circle (centered)
   local cx = 64
   local cy = 42
@@ -1590,15 +1592,14 @@ local function draw_page_rungler()
   screen.move(126, 28)
   screen.text_right(string.format("%.2fx", rungler.speed))
 
-  -- Register value bottom
-  screen.level(5)
+  -- Bottom row: K hints + register info
+  screen.level(3)
   screen.move(2, 63)
   screen.font_size(7)
-  screen.text("reg:" .. string.format("%03d", rungler.reg))
-
-  -- Step count
+  screen.text("K2 qtz:" .. (quantize and "ON" or "OFF") .. "  K3 reseed")
+  screen.level(5)
   screen.move(126, 63)
-  screen.text_right("step:" .. rungler.step_count)
+  screen.text_right("r:" .. string.format("%03d", rungler.reg))
 end
 
 -- PAGE 3: SPACE — reverb and distortion
@@ -1649,7 +1650,6 @@ local function draw_page_space()
   -- RIGHT: distortion column
   local drv = params:get("drive")
   local ws = params:get("waveshape")
-  local fxs = params:get("fx_send")
 
   screen.level(6)
   screen.move(68, 29)
@@ -1711,16 +1711,10 @@ local function draw_page_chaos()
   screen.text_right("K3 scale:" .. SCALES[scale_idx])
 
   -- Large param displays (2x2 grid)
-  draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 30)
-  draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 30)
-  draw_big_param("GRIND", roughness * 100, "%.0f%%", 4, 50)
-  draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 50)
-
-  -- Root note display
-  screen.level(5)
-  screen.move(64, 56)
-  screen.font_size(7)
-  screen.text_center("root: " .. musicutil.note_num_to_name(scale_root, true))
+  draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 28)
+  draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 28)
+  draw_big_param("GRIND", roughness * 100, "%.0f%%", 4, 46)
+  draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 46)
 end
 
 function redraw()
@@ -1847,9 +1841,9 @@ function init()
   params:add_option("bandmate_style", "bandmate style", style_names, 1)
   params:set_action("bandmate_style", function(v)
     bandmate_style = v
-    if v == 7 then stereo_new_phase() end  -- init stereo phases
+    if v == STYLE_STEREO then stereo_new_phase() end  -- init stereo phases
     -- Reset pans to default spread when leaving STEREO
-    if v ~= 7 then
+    if v ~= STYLE_STEREO then
       for i = 1, NUM_VOICES do
         stereo.pans[i] = ((i - 1) / 7.0) * 2 - 1
         pcall(function() engine.pan(i - 1, stereo.pans[i] * 0.7) end)
