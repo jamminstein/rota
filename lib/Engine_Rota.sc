@@ -1,27 +1,25 @@
 // Engine_Rota.sc
 // A Ciat-Lombarde rungler + Motor Synth inertia engine for norns
-// Two oscillators cross-modulate a shift register (the Rungler).
-// The Rungler output drives up to 8 "motor" voices — oscillators
-// with physical inertia (Lag), electromagnetic cogging noise,
-// and an optical waveshaper that imposes asymmetric distortion.
+//
+// 8 "motor" voices with physical inertia, multi-timbral oscillators,
+// cogging noise, wavefolder, and a JPverb FX bus.
+//
+// Each voice has 3 oscillator sources:
+//   1. VarSaw (optical disc waveform: saw/tri/reverse saw)
+//   2. Pulse (PWM: thin buzzy to fat square)
+//   3. Sub (sine one octave below for weight)
+// Plus self-FM for metallic/bell textures.
 //
 // Sound philosophy:
 //   - Rough like an electric motor vibrating at resonance
 //   - Polished like the Meris Mercury7 trailing its decay into silence
 //   - Deterministic chaos: the same patch never repeats, never collapses
-//
-// NOTE: The \rota_rungler SynthDef has been removed.
-// All rungler logic is implemented Lua-side for maximum control
-// and visibility (lattice-driven shift register, topology mutation,
-// bandmate style integration). The SC engine is purely a sound
-// generator: 8 motor voices + FX bus. The Lua rungler feeds target
-// frequencies to the motors via the engine.freq() command.
 
 Engine_Rota : CroneEngine {
 
-  var <synths;          // array of 8 motor voice synths
-  var <fxSynth;         // reverb + saturation bus synth
-  var <fxBus;           // audio bus for FX chain
+  var <synths;
+  var <fxSynth;
+  var <fxBus;
   var voiceGroup;
   var fxGroup;
 
@@ -35,46 +33,56 @@ Engine_Rota : CroneEngine {
     fxBus = Bus.audio(s, 2);
 
     // ---------------------------------------------------------------
-    // MOTOR VOICE SynthDef
-    // Each voice is an oscillator whose pitch chases a target with
-    // physical inertia (Lag). Timbre comes from:
-    //   - VarSaw (the optical waveform: imperfect, slightly triangular)
-    //   - Cogging noise: LFNoise0 at low freq multiplies amplitude
-    //   - Electromagnetic roughness: phase noise via LFNoise2
-    //   - A soft wavefolder that adds harmonic grit without aliasing
+    // MOTOR VOICE SynthDef — multi-timbral oscillator bank
     // ---------------------------------------------------------------
     SynthDef(\rota_motor, {
       arg out=0, fxBus=0,
           targetFreq=110, inertia=0.5,
           amp=0.0, ampLag=0.08,
           grind=0.2, phaseNoise=0.01,
-          waveshape=0.5,
+          waveshape=0.5,       // VarSaw width (0=saw, 0.5=tri, 1=rev saw)
+          pulseWidth=0.5,      // Pulse wave width (0.01=thin, 0.5=square)
+          oscMix=0.0,          // 0=all VarSaw, 1=all Pulse
+          subLevel=0.0,        // Sub oscillator level (0-1)
+          fmAmt=0.0,           // Self-FM amount (0=clean, 1=metallic)
           fxSend=0.4,
           pan=0.0;
 
-      var freq, phaseMod, sig, cogging, env;
+      var freq, phaseMod, sigVar, sigPulse, sigSub, sigFM, sig, cogging, env;
 
       // Physical inertia: pitch slides to target with lag
-      // inertia 0.0 = instant snap, 1.5 = very heavy/slow
       freq = Lag.kr(targetFreq, inertia);
 
       // Electromagnetic phase noise (brush contact irregularity)
       phaseMod = LFNoise2.ar(freq * 0.03) * (freq * phaseNoise * 0.5);
 
-      // VarSaw: width modulated slowly = optical disc imperfection
-      // waveshape 0=saw, 0.5=triangle-ish, 1=reverse saw
-      sig = VarSaw.ar(freq + phaseMod, 0,
+      // --- OSCILLATOR 1: VarSaw (optical disc waveform) ---
+      sigVar = VarSaw.ar(freq + phaseMod, 0,
         waveshape + (LFNoise1.kr(0.7) * 0.08));
 
+      // --- OSCILLATOR 2: Pulse (PWM) ---
+      // Width modulated by slow LFO for movement
+      sigPulse = Pulse.ar(freq + phaseMod,
+        (pulseWidth + (LFNoise1.kr(0.5) * 0.06)).clip(0.01, 0.99));
+
+      // --- OSCILLATOR 3: Sub (sine, one octave below) ---
+      sigSub = SinOsc.ar(freq * 0.5) * subLevel;
+
+      // --- Self-FM: frequency modulation for metallic/bell textures ---
+      sigFM = SinOsc.ar(freq + (SinOsc.ar(freq * 1.414) * freq * fmAmt * 0.5));
+      // Blend FM into the mix when fmAmt > 0
+      sigVar = sigVar * (1 - (fmAmt * 0.5)) + (sigFM * fmAmt * 0.5);
+
+      // --- MIX oscillators ---
+      sig = (sigVar * (1 - oscMix)) + (sigPulse * oscMix) + sigSub;
+
       // Cogging noise: low-freq amplitude flutter (motor teeth)
-      // Creates the characteristic "roughness" at low RPM
       cogging = 1 - (grind * LFNoise0.kr(freq * 0.12).range(0, 1));
       sig = sig * cogging;
 
       // Soft wavefold: adds upper harmonics without hard clipping
-      // This is the "polished grit" — warm distortion, not digital
       sig = (sig * (1 + (grind * 2))).fold(-1, 1);
-      sig = sig.tanh * 0.7; // final soft saturation
+      sig = sig.tanh * 0.7;
 
       // Amplitude with lag (smooth on/off like a motor spinning up)
       env = Lag.kr(amp, ampLag);
@@ -91,10 +99,6 @@ Engine_Rota : CroneEngine {
 
     // ---------------------------------------------------------------
     // FX BUS SynthDef
-    // The output of all voices passes through:
-    //   1. Gentle drive/saturation (the motor amp stage)
-    //   2. JPverb reverb (the mercury7 space)
-    //   3. Subtle tape roll-off (anti-alias warmth)
     // ---------------------------------------------------------------
     SynthDef(\rota_fx, {
       arg in=0, out=0,
@@ -106,14 +110,9 @@ Engine_Rota : CroneEngine {
       var sig, wet;
 
       sig = In.ar(in, 2);
-
-      // Drive stage: warms up the motor voices collectively
       sig = (sig * (1 + drive)).tanh;
-
-      // High-frequency rolloff (tape machine warmth)
       sig = LPF.ar(sig, rolloff);
 
-      // JPverb: the reverb of choice for norns (sc3-plugins)
       wet = JPverb.ar(sig,
         t60: revT60,
         damp: revDamp,
@@ -130,65 +129,53 @@ Engine_Rota : CroneEngine {
     s.sync;
 
     // ---------------------------------------------------------------
-    // Instantiate the synths in proper group order
+    // Instantiate synths
     // ---------------------------------------------------------------
     voiceGroup = Group.new(context.xg);
     fxGroup    = Group.after(voiceGroup);
 
     fxSynth = Synth(\rota_fx, [
-      \in,      fxBus.index,
-      \out,     context.out_b,
-      \drive,   0.15,
-      \revSize, 1.2,
-      \revT60,  3.0,
-      \revDamp, 0.5,
-      \revMix,  0.35,
-      \rolloff, 8000
+      \in, fxBus.index, \out, context.out_b,
+      \drive, 0.15, \revSize, 1.2, \revT60, 3.0,
+      \revDamp, 0.5, \revMix, 0.35, \rolloff, 8000
     ], fxGroup);
 
-    // Create 8 motor voices, initially silent
     synths = Array.new(8);
     8.do { |i|
-      var pan = (i / 7.0 * 2) - 1; // spread -1 to +1
+      var pan = (i / 7.0 * 2) - 1;
       synths.add(
         Synth(\rota_motor, [
-          \out,        context.out_b,
-          \fxBus,      fxBus.index,
-          \targetFreq, 55 * (i + 1).sqrt, // harmonic-ish spacing
-          \inertia,    0.3 + (i * 0.08),  // each motor has own physics
-          \amp,        0.0,
-          \grind,      0.15,
-          \phaseNoise, 0.01,
-          \waveshape,  0.45,
-          \fxSend,     0.4,
-          \pan,        pan * 0.7
+          \out, context.out_b, \fxBus, fxBus.index,
+          \targetFreq, 55 * (i + 1).sqrt,
+          \inertia, 0.3 + (i * 0.08),
+          \amp, 0.0, \grind, 0.15, \phaseNoise, 0.01,
+          \waveshape, 0.45, \pulseWidth, 0.5,
+          \oscMix, 0.0, \subLevel, 0.0, \fmAmt, 0.0,
+          \fxSend, 0.4, \pan, pan * 0.7
         ], voiceGroup)
       );
     };
 
     // ---------------------------------------------------------------
-    // ENGINE COMMANDS — all parameters accessible from Lua
+    // ENGINE COMMANDS
     // ---------------------------------------------------------------
 
-    // Per-voice frequency target (inertia engine will chase it)
+    // Per-voice frequency target
     this.addCommand("freq", "if", { |msg|
-      var idx = msg[1].clip(0, 7);
-      synths[idx].set(\targetFreq, msg[2]);
+      synths[msg[1].clip(0,7)].set(\targetFreq, msg[2]);
     });
 
     // Per-voice amplitude
     this.addCommand("amp", "if", { |msg|
-      var idx = msg[1].clip(0, 7);
-      synths[idx].set(\amp, msg[2]);
+      synths[msg[1].clip(0,7)].set(\amp, msg[2]);
     });
 
-    // Per-voice inertia (0=instant, 1.5=very slow)
+    // Per-voice inertia
     this.addCommand("inertia", "if", { |msg|
-      var idx = msg[1].clip(0, 7);
-      synths[idx].set(\inertia, msg[2]);
+      synths[msg[1].clip(0,7)].set(\inertia, msg[2]);
     });
 
-    // Global grind (electromechanical roughness 0..1)
+    // Global grind
     this.addCommand("grind", "f", { |msg|
       synths.do { |s| s.set(\grind, msg[1]) };
     });
@@ -198,7 +185,7 @@ Engine_Rota : CroneEngine {
       synths[msg[1].clip(0,7)].set(\grind, msg[2]);
     });
 
-    // Global waveshape (0=saw, 0.5=tri-ish, 1=inv saw)
+    // Global waveshape
     this.addCommand("waveshape", "f", { |msg|
       synths.do { |s| s.set(\waveshape, msg[1]) };
     });
@@ -208,7 +195,47 @@ Engine_Rota : CroneEngine {
       synths[msg[1].clip(0,7)].set(\waveshape, msg[2]);
     });
 
-    // Global phase noise (electromagnetic texture)
+    // Global pulse width
+    this.addCommand("pulse_width", "f", { |msg|
+      synths.do { |s| s.set(\pulseWidth, msg[1]) };
+    });
+
+    // Per-voice pulse width
+    this.addCommand("pulse_width_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\pulseWidth, msg[2]);
+    });
+
+    // Global osc mix (0=VarSaw, 1=Pulse)
+    this.addCommand("osc_mix", "f", { |msg|
+      synths.do { |s| s.set(\oscMix, msg[1]) };
+    });
+
+    // Per-voice osc mix
+    this.addCommand("osc_mix_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\oscMix, msg[2]);
+    });
+
+    // Global sub level
+    this.addCommand("sub_level", "f", { |msg|
+      synths.do { |s| s.set(\subLevel, msg[1]) };
+    });
+
+    // Per-voice sub level
+    this.addCommand("sub_level_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\subLevel, msg[2]);
+    });
+
+    // Global FM amount
+    this.addCommand("fm_amt", "f", { |msg|
+      synths.do { |s| s.set(\fmAmt, msg[1]) };
+    });
+
+    // Per-voice FM amount
+    this.addCommand("fm_amt_v", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\fmAmt, msg[2]);
+    });
+
+    // Global phase noise
     this.addCommand("phase_noise", "f", { |msg|
       synths.do { |s| s.set(\phaseNoise, msg[1]) };
     });
@@ -218,58 +245,32 @@ Engine_Rota : CroneEngine {
       synths[msg[1].clip(0,7)].set(\phaseNoise, msg[2]);
     });
 
-    // FX: reverb mix
-    this.addCommand("rev_mix", "f", { |msg|
-      fxSynth.set(\revMix, msg[1]);
-    });
+    // FX commands
+    this.addCommand("rev_mix", "f", { |msg| fxSynth.set(\revMix, msg[1]) });
+    this.addCommand("rev_time", "f", { |msg| fxSynth.set(\revT60, msg[1]) });
+    this.addCommand("rev_size", "f", { |msg| fxSynth.set(\revSize, msg[1]) });
+    this.addCommand("drive", "f", { |msg| fxSynth.set(\drive, msg[1]) });
+    this.addCommand("rolloff", "f", { |msg| fxSynth.set(\rolloff, msg[1]) });
 
-    // FX: reverb time
-    this.addCommand("rev_time", "f", { |msg|
-      fxSynth.set(\revT60, msg[1]);
-    });
-
-    // FX: reverb size
-    this.addCommand("rev_size", "f", { |msg|
-      fxSynth.set(\revSize, msg[1]);
-    });
-
-    // FX: drive (global saturation)
-    this.addCommand("drive", "f", { |msg|
-      fxSynth.set(\drive, msg[1]);
-    });
-
-    // FX: high frequency rolloff
-    this.addCommand("rolloff", "f", { |msg|
-      fxSynth.set(\rolloff, msg[1]);
-    });
-
-    // FX send per voice
     this.addCommand("fx_send", "if", { |msg|
       synths[msg[1].clip(0,7)].set(\fxSend, msg[2]);
     });
-
-    // Global FX send
     this.addCommand("fx_send_all", "f", { |msg|
       synths.do { |s| s.set(\fxSend, msg[1]) };
     });
 
-    // Per-voice amp lag (spin-up speed)
     this.addCommand("amp_lag", "if", { |msg|
       synths[msg[1].clip(0,7)].set(\ampLag, msg[2]);
     });
 
-    // Per-voice pan (-1 left, 0 center, +1 right)
     this.addCommand("pan", "if", { |msg|
       synths[msg[1].clip(0,7)].set(\pan, msg[2]);
     });
 
-    // All voices off
     this.addCommand("all_off", "", { |msg|
       synths.do { |s| s.set(\amp, 0.0) };
     });
 
-    // Set all amplitudes at once (8 floats packed as one param)
-    // Uses 8 separate commands for simplicity
     8.do { |i|
       this.addCommand("amp" ++ i, "f", { |msg|
         synths[i].set(\amp, msg[1]);

@@ -10,54 +10,120 @@ Two ideas that shouldn't fit together, but do completely:
 
 **Ciat-Lombarde / Benjolin rungler** -- a shift register that eats its own output. Clocked by two oscillators that are themselves modulated by the shift register. The system feeds back on itself, creating deterministic chaos: patterns that repeat but never quite the same way twice.
 
-**Motor Synth MKII** -- eight DC motors spinning as oscillators. Pitch isn't a number -- it's a target that a physical object has to *arrive at*. Inertia is real. Acceleration and braking are real. The electromagnetic pickup produces a waveform that no digitally designed oscillator has ever made.
+**Motor Synth MKII** -- eight DC motors spinning as oscillators. Pitch isn't a number -- it's a target that a physical object has to *arrive at*. Inertia is real. Acceleration and braking are real.
 
-ROTA is what happens when you run 8 motor voices -- each with its own mass, each with its own cogging friction -- and give them targets determined by a self-modifying shift register. You're not sequencing notes. You're releasing a physical system into a harmonic space and watching it find its own equilibria.
+ROTA runs 8 motor voices -- each with its own mass, its own cogging friction -- and gives them targets determined by a self-modifying shift register. You're not sequencing notes. You're releasing a physical system into a harmonic space and watching it find its own equilibria.
 
 ---
 
 ## Sound Character
 
-- **Rough but polished**: the wavefolder adds harmonics without aliasing; the JPverb reverb trails everything into silk
-- **Radical and pleasing**: dissonances arise naturally from the rungler and resolve as motors arrive at new targets
-- **Organic**: amplitude cogging, phase noise, and per-voice inertia variation make every voice sound slightly alive
+- **Multi-timbral oscillator**: each voice blends VarSaw and Pulse waveforms (osc mix), with variable pulse width, sub-oscillator one octave below, and FM for metallic/bell textures. Per-note timbre is driven by the rungler bits -- every note has a unique waveform character.
+- **Rough but polished**: the wavefolder adds harmonics without aliasing; JPverb reverb trails everything into silk.
+- **Radical and pleasing**: dissonances arise naturally from the rungler and resolve as motors arrive at new targets.
+- **Organic**: amplitude cogging, phase noise, and per-voice inertia variation make every voice sound slightly alive.
 
 ---
 
 ## Controls
 
+5 pages, navigated with E1.
+
+### Page 1: MOTORS
+
 | Control | Function |
 |---------|----------|
-| **ENC1** | Chaos -- rungler feedback depth. Low = orderly patterns, high = volatile chaos |
-| **ENC2** | Mass -- global motor inertia. Low = instant pitch snap, high = slow glacial movement |
-| **ENC3** | Roughness -- electromechanical grit. Low = clean, high = cogged and industrial |
-| **KEY2** | Tap: toggle bandmate on/off. Hold (>0.5s): cycle bandmate style |
-| **KEY3** | Reseed -- inject new random state into the rungler + randomize pitch offsets |
+| E2 | Density -- gate probability (how many voices sound per step) |
+| E3 | Aggression -- brutality scaling (drive, grind, amp, dryness) |
+| K2 | Short press: play/stop. Long press (>0.5s): cycle bandmate style |
+| K3 | Randomize which voices are active |
+
+### Page 2: RUNGLER
+
+| Control | Function |
+|---------|----------|
+| E2 | Chaos -- rungler feedback depth. Low = orderly, high = volatile |
+| E3 | Rungler speed -- clock rate multiplier (0.125x to 8x) |
+| K2 | Short press: play/stop. Long press: cycle bandmate style |
+| K3 | Reseed -- inject new random state into shift register + pitch offsets |
+
+### Page 3: SPACE
+
+| Control | Function |
+|---------|----------|
+| E2 | Reverb macro -- controls mix, time, and size together |
+| E3 | Distortion macro -- controls drive, waveshape, and roughness together |
+| K2 | Short press: play/stop. Long press: cycle bandmate style |
+| K3 | Randomize timbre (waveshape, drive, roughness) |
+
+Display shows reverb (mix/time/size), distortion (drive/shape/grind), FX send level, and oscillator mode (SAW/MIX/PLS).
+
+### Page 4: CHAOS
+
+| Control | Function |
+|---------|----------|
+| E2 | Chaos -- rungler feedback depth |
+| E3 | Mass -- global motor inertia. Low = instant pitch snap, high = glacial slides |
+| K2 | Short press: play/stop. Long press: cycle bandmate style |
+| K3 | Toggle octave shift (-2 to +2) |
+
+### Page 5: RHYTHM
+
+| Control | Function |
+|---------|----------|
+| E2 | Cycle gate mode (FREE / PATTERN / EUCLID) |
+| E3 | Mode-specific: FREE = density, PATTERN = rotate patterns, EUCLID = change hit count |
+| K2 | Short press: play/stop. Long press: cycle bandmate style |
+| K3 | Randomize gate patterns / euclidean parameters |
+
+---
+
+## Gate Modes
+
+| Mode | Behavior |
+|------|----------|
+| **FREE** | Rungler bits determine which voices gate on each step. Density scales probability. This is the default chaos mode. |
+| **PATTERN** | 8-step gate patterns per voice. Deterministic rhythms that interact with the rungler's note choices. |
+| **EUCLID** | Euclidean rhythms per voice with adjustable hit count and rotation. Mathematical rhythmic structures. |
 
 ---
 
 ## Bandmate System
 
-ROTA's bandmate replaces the old auto mode with 6 distinct performance styles. Each style shapes how the system evolves over time -- chaos sweeps, voice density, reverb breathing, topology mutations, and reseed probability.
+10 distinct performance styles that shape how the system evolves over time. Each style controls chaos sweeps, voice density, reverb breathing, topology mutations, timbre evolution, and reseed probability.
 
 | Style | Character |
 |-------|-----------|
-| **DRIFT** | The meditator. Very slow evolution. Chaos 0.2-0.5. Voices turn on/off one at a time with long gaps. High reverb. The gentlest explorer. |
-| **SURGE** | The crescendo builder. Gradually increases chaos from low to high over ~30-60 seconds, then pulls back suddenly. Creates natural swell-and-release forms. |
+| **DRIFT** | The meditator. Very slow evolution. Chaos 0.15-0.45. Voices turn on/off one at a time with long gaps. High reverb. The gentlest explorer. |
+| **SURGE** | The crescendo builder. Gradually increases chaos from low to high, then pulls back suddenly. Creates natural swell-and-release forms. |
 | **SWARM** | The density player. Rapidly toggles voices on/off in patterns. All 8 voices in play. Per-voice inertia varies wildly. Creates buzzing cloud textures. |
-| **BLASSER** | Channels the Ciat-Lombarde spirit. High chaos (0.6-0.9). Topology mutations. Frequent reseeds. Quantize toggles on/off. True Benjolin behavior. |
+| **BLASSER** | Channels the Ciat-Lombarde spirit. High chaos (0.55-0.95). Topology mutations. Frequent reseeds. Quantize toggles on/off. True Benjolin behavior. |
 | **GLACIAL** | The deep listener. Very high mass/inertia. Low chaos. Only 2-3 voices. Each note takes seconds to arrive. Reverb maxed. Time feels suspended. |
 | **RUPTURE** | The disruptor. Sudden parameter jumps. Roughness spikes to max then drops. Voices slam on/off in groups. Controlled chaos bursts with silence between. |
+| **STEREO** | The spatial architect. Voices move through stereo field in 5 phases: SPLIT, ARPEGGIO, CONVERGE, DIALOGUE, SWIRL. Moderate chaos, high density. |
+| **CLOCKWORK** | The machine. Low mass for snappy attacks, high density, dry reverb. Precise rhythmic patterns. The most percussive style. |
+| **FREERUN** | The drifter. Unquantized chaos with heavy mass. Notes float unmoored in reverb wash. No hurry. Scale changes more frequent. |
+| **CONDUCTOR** | The orchestrator. Borrows behavior from other styles in planned multi-movement structures (exposition, development, transition, recapitulation, coda). Macro-level compositional form. |
 
 ---
 
-## MIDI Out
+## ARC Engine
 
-ROTA doubles as a chaotic MIDI sequencer. When a motor voice gets a new target frequency, it sends MIDI note-on on the corresponding channel (voice 1 = channel 1, etc).
+An always-on progression intelligence that runs on top of any bandmate style. Creates macro-level song form with 8 phases:
 
-Configure via PARAMS > MIDI OUT:
-- **midi out device**: select your MIDI output
-- **midi base channel**: starting channel (voices map to consecutive channels)
+INTRO -- BUILD -- DROP -- SUSTAIN -- BREAKDOWN -- TENSION -- CLIMAX -- EXHALE
+
+Each phase has a target intensity and duration. Intensity modulates density, aggression, voice count, and reverb. The arc engine creates deliberate curves -- not random parameter changes, but planned journeys. On each new cycle, it may change scale and root for freshness. CLIMAX can shift octave up; BREAKDOWN brings it back down.
+
+Toggle via PARAMS > ARC > arc engine.
+
+---
+
+## Presets
+
+4 snapshot slots that save and recall all performance parameters (chaos, mass, roughness, density, aggression, reverb, drive, waveshape, fx send, osc mix, pulse width, sub level, FM amount, scale, root, rungler speed, octave shift).
+
+Access via PARAMS > PRESETS.
 
 ---
 
@@ -93,21 +159,69 @@ Row 8  [<-]                       Back to page 1
 
 ---
 
-## PARAMS Menu
+## MIDI Out
+
+ROTA doubles as a chaotic MIDI sequencer. When a motor voice gets a new target frequency, it sends MIDI note-on on the corresponding channel (voice 1 = channel 1, etc).
+
+Configure via PARAMS > MIDI OUT:
+- **midi out device**: select your MIDI output
+- **midi base channel**: starting channel (voices map to consecutive channels)
+
+---
+
+## OP-XY MIDI Out
+
+Dedicated OP-XY output with CC mapping:
+
+| CC | Parameter |
+|----|-----------|
+| CC 74 | Filter cutoff (from chaos) |
+| CC 11 | Expression (from density) |
+| CC 91 | Reverb send (from rev_mix) |
+| CC 1 | Mod wheel (from waveshape) |
+| CC 71 | Resonance (from roughness) |
+
+Per-voice notes on separate channels for polyphonic motor control.
+
+---
+
+## Robot Mod
+
+ROTA includes a robot profile for the robot bandmate system. The profile maps all performance parameters with appropriate weights and sensitivities.
+
+Primary levers: chaos (0.95), density (0.85), mass (0.8). Timbral controls: waveshape, osc mix, roughness, pulse width, sub level, FM amount, drive, fx send, reverb. Structural events (scale, bandmate style, arc engine, gate mode) are weighted low for rare dramatic shifts.
+
+Copy the profile: `lib/profiles/rota.lua` to `~/dust/code/robot/lib/profiles/rota.lua`
+
+---
+
+## Params
 
 | Param | Range | Default |
 |-------|-------|---------|
 | chaos | 0-1 | 0.4 |
 | mass | 0-1.5 | 0.5 |
 | roughness | 0-1 | 0.2 |
+| density | 0-1 | 0.7 |
+| aggression | 0-1 | 0.0 |
+| osc mix | 0-1 | 0.0 (VarSaw) |
+| pulse width | 0.01-0.99 | 0.5 |
+| sub osc level | 0-1 | 0.0 |
+| FM amount | 0-1 | 0.0 |
+| waveshape | 0-1 | 0.45 |
+| drive | 0-1 | 0.1 |
+| fx send | 0-1 | 0.4 |
 | reverb time | 0.5-12s | 3.0s |
 | reverb mix | 0-1 | 0.35 |
 | reverb size | 0.5-5 | 1.2 |
 | scale | chromatic-phrygian | minor |
-| root | C2-C4 | C2 |
+| root | C2-C4 | C2 (MIDI 36) |
 | quantize | on/off | on |
 | rungler speed | 0.125-8x | 1x |
-| bandmate style | DRIFT-RUPTURE | DRIFT |
+| octave shift | -2 to +2 | 0 |
+| gate mode | FREE/PATTERN/EUCLID | FREE |
+| arc engine | on/off | off |
+| bandmate style | DRIFT-CONDUCTOR | DRIFT |
 | bandmate | on/off | off |
 | midi out device | - | - |
 | midi base channel | 1-16 | 1 |
@@ -128,8 +242,6 @@ Or manually:
 
 **Dependencies**: sc3-plugins must be installed on your norns (JPverb is in sc3-plugins/DEINDUGens). Most norns installations include sc3-plugins by default.
 
-**Robot mod**: Copy the profile from `lib/profiles/rota.lua` to `~/dust/code/robot/lib/profiles/rota.lua` for bandmate integration.
-
 ---
 
 ## Technical Architecture
@@ -142,6 +254,11 @@ Lua layer:
   | sends to engine via engine.freq(voice, hz)
   | sends MIDI out on note change
 
+  Per-note timbre (from rungler bits):
+  | waveshape, inertia, grind, fx_send, phase_noise, amp_lag
+  | osc_mix (saw vs pulse), pulse_width, sub_level, fm_amt
+  | Each voice reads different register bits for independence
+
   Lattice (5 sprockets, prime-ratio divisions):
     1/8    -> rungler step + voice update (speed-accumulated)
     7/4    -> harmony/density/topology/reseed (bandmate)
@@ -149,16 +266,25 @@ Lua layer:
     13/4   -> reverb evolution (bandmate)
     1/32   -> screen animation
 
-  Bandmate (6 styles):
+  Bandmate (10 styles):
     DRIFT / SURGE / SWARM / BLASSER / GLACIAL / RUPTURE
+    STEREO / CLOCKWORK / FREERUN / CONDUCTOR
     Each defines: chaos/mass/roughness ranges, voice density,
     evolution speed, scale preference, reverb targets,
     reseed probability, topology mutation probability
 
+  ARC engine (8-phase intensity curve):
+    INTRO / BUILD / DROP / SUSTAIN / BREAKDOWN
+    TENSION / CLIMAX / EXHALE
+    Runs on top of bandmate style for macro-level form
+
 SuperCollider engine (lib/Engine_Rota.sc):
   8x rota_motor SynthDefs:
+    VarSaw + Pulse oscillator blend (osc_mix)
+    Sub oscillator (one octave below)
+    FM modulation (sine ratio)
     Lag.kr(targetFreq, inertia)      -> physical pitch inertia
-    VarSaw.ar + phaseNoise           -> optical waveform imperfection
+    phaseNoise                       -> optical waveform imperfection
     LFNoise0.kr cogging              -> electromechanical amplitude texture
     .fold(-1,1).tanh                 -> wavefold + soft saturation
 
@@ -167,14 +293,6 @@ SuperCollider engine (lib/Engine_Rota.sc):
     LPF rolloff                      -> tape warmth
     JPverb                           -> the reverb space
 ```
-
----
-
-## Aesthetic Notes
-
-The reverb is intentionally long. ROTA is not a percussive instrument -- it's a drone system that breathes. The motors spin up, find frequency, beat against each other in natural unison drift, and tail off into JPverb's wash.
-
-The chaos parameter is musical, not random. At 0.2-0.4, the rungler settles into long cycles that feel composed. At 0.7+, it becomes genuinely unpredictable. The sweet spot for "radical and pleasing" is 0.35-0.55 with moderate mass (0.4-0.6) and low roughness (0.1-0.25).
 
 ---
 

@@ -345,6 +345,19 @@ local function arc_tick()
 end
 
 -- -----------------------------------------------------------------------
+-- PRESETS: 4 snapshot slots (functions defined after update_globals)
+-- -----------------------------------------------------------------------
+local presets = {{}, {}, {}, {}}
+local PRESET_PARAMS = {
+  "chaos", "mass", "roughness", "density", "aggression",
+  "rev_time", "rev_mix", "rev_size", "drive", "waveshape",
+  "fx_send", "osc_mix", "pulse_width", "sub_level", "fm_amt",
+  "scale", "root", "rungler_speed", "octave_shift"
+}
+local save_preset   -- forward declare
+local load_preset   -- forward declare
+
+-- -----------------------------------------------------------------------
 -- GATE PATTERN / RHYTHM SYSTEM
 -- -----------------------------------------------------------------------
 
@@ -941,6 +954,36 @@ local function update_globals()
   end
 end
 
+-- PRESET functions (forward-declared above)
+save_preset = function(slot)
+  presets[slot] = {}
+  for _, id in ipairs(PRESET_PARAMS) do
+    presets[slot][id] = params:get(id)
+  end
+end
+
+load_preset = function(slot)
+  if not presets[slot] or not next(presets[slot]) then return end
+  for _, id in ipairs(PRESET_PARAMS) do
+    if presets[slot][id] then
+      params:set(id, presets[slot][id])
+    end
+  end
+  -- Update local state from params
+  chaos = params:get("chaos")
+  mass = params:get("mass")
+  roughness = params:get("roughness")
+  density = params:get("density")
+  aggression = params:get("aggression")
+  octave_shift = params:get("octave_shift")
+  scale_idx = params:get("scale")
+  scale_root = params:get("root")
+  rungler.speed = params:get("rungler_speed")
+  rungler.feedback = chaos
+  rebuild_scale()
+  update_globals()
+end
+
 -- Silence a voice (gate off) — motor spins down with lag
 local function gate_off(i)
   motors[i].gated = false
@@ -1395,6 +1438,37 @@ local function bandmate_evolve_timbre()
   params:set("waveshape", ws, true)
   pcall(function() engine.waveshape(ws) end)
 
+  -- 1b. OSC MIX + PULSE WIDTH + SUB + FM: style-dependent timbral range
+  local osc_mix, pw, sub, fm
+  if use_steps then
+    -- Step mode: snap between timbral characters
+    if math.random() < tspeed * 0.2 then
+      osc_mix = ({0, 0, 0.3, 0.6, 0.8, 1.0})[math.random(6)]
+      pw = 0.1 + math.random() * 0.8
+      sub = math.random() < 0.4 and (0.2 + math.random() * 0.5) or 0
+      fm = math.random() < 0.2 and (aggression * 0.5 + math.random() * 0.3) or 0
+    else
+      osc_mix = params:get("osc_mix")
+      pw = params:get("pulse_width")
+      sub = params:get("sub_level")
+      fm = params:get("fm_amt")
+    end
+  else
+    -- Sine mode: slow sweeps
+    osc_mix = util.clamp(0.3 + math.sin(t * 0.09) * 0.35, 0, 1)
+    pw = util.clamp(0.5 + math.sin(t * 0.13) * 0.35, 0.05, 0.95)
+    sub = util.clamp(math.sin(t * 0.07) * 0.3 + 0.15, 0, 0.7)
+    fm = util.clamp(aggression * 0.4 + math.sin(t * 0.19) * 0.15, 0, 0.8)
+  end
+  params:set("osc_mix", osc_mix, true)
+  params:set("pulse_width", pw, true)
+  params:set("sub_level", sub, true)
+  params:set("fm_amt", fm, true)
+  pcall(function() engine.osc_mix(osc_mix) end)
+  pcall(function() engine.pulse_width(pw) end)
+  pcall(function() engine.sub_level(sub) end)
+  pcall(function() engine.fm_amt(fm) end)
+
   -- 2. PER-VOICE GRIND: fast = random scatter, slow = sine waves
   for i = 1, NUM_VOICES do
     local vg
@@ -1585,10 +1659,34 @@ local function setup_lattice()
               local snap = ((shifted >> 2) & 0x01) == 1
               pcall(function() engine.amp_lag(i - 1, snap and 0.02 or 0.12) end)
 
+              -- Osc mix per-note: bit 4 decides saw vs pulse
+              local note_osc_mix = ((shifted >> 4) & 0x01) == 1 and
+                (0.6 + math.random() * 0.4) or (math.random() * 0.3)
+              pcall(function() engine.osc_mix_v(i - 1, note_osc_mix) end)
+
+              -- Pulse width per-note: from rungler value
+              local note_pw = 0.15 + rung * 0.7
+              pcall(function() engine.pulse_width_v(i - 1, note_pw) end)
+
+              -- Sub level: bass voices get more sub, high voices less
+              local note_sub = 0
+              if role.name == "bass" then
+                note_sub = 0.3 + rung * 0.4
+              elseif role.name == "mid" then
+                note_sub = rung * 0.2
+              end
+              pcall(function() engine.sub_level_v(i - 1, note_sub) end)
+
               -- ---- VELOCITY: rungler-driven accents ----
               -- Accent when bits 0+1+2 are all 1 (12.5% probability, patterned not random)
               local accent = (shifted & 0x07) == 0x07
               local vel_raw = role.amp_lo + rung * (role.amp_hi - role.amp_lo)
+
+              -- FM amount: from aggression + chaos (metallic at high intensity)
+              local note_fm = aggression * chaos * 0.6
+              if accent then note_fm = note_fm + 0.2 end
+              note_fm = util.clamp(note_fm, 0, 0.8)
+              pcall(function() engine.fm_amt_v(i - 1, note_fm) end)
               -- Aggression boosts amp and makes accents harder
               vel_raw = vel_raw * (1 + aggression * 0.6)
               if accent then vel_raw = vel_raw * (1.4 + aggression * 0.4) end
@@ -2465,6 +2563,14 @@ local function draw_page_space()
   screen.move(100, 47)
   screen.text(string.format("%.0f%%", roughness * 100))
 
+  screen.level(6)
+  screen.move(68, 56)
+  screen.text("OSC")
+  screen.level(12)
+  screen.move(86, 56)
+  local mix_val = params:get("osc_mix")
+  screen.text(mix_val < 0.3 and "SAW" or (mix_val > 0.7 and "PLS" or "MIX"))
+
   -- FX send
   screen.level(6)
   screen.move(2, 56)
@@ -2725,6 +2831,34 @@ function init()
     screen_dirty = true
   end)
 
+  params:add_control("osc_mix", "osc mix (saw/pulse)",
+    controlspec.new(0, 1, "lin", 0.01, 0.0, ""))
+  params:set_action("osc_mix", function(v)
+    pcall(function() engine.osc_mix(v) end)
+    screen_dirty = true
+  end)
+
+  params:add_control("pulse_width", "pulse width",
+    controlspec.new(0.01, 0.99, "lin", 0.01, 0.5, ""))
+  params:set_action("pulse_width", function(v)
+    pcall(function() engine.pulse_width(v) end)
+    screen_dirty = true
+  end)
+
+  params:add_control("sub_level", "sub osc level",
+    controlspec.new(0, 1, "lin", 0.01, 0.0, ""))
+  params:set_action("sub_level", function(v)
+    pcall(function() engine.sub_level(v) end)
+    screen_dirty = true
+  end)
+
+  params:add_control("fm_amt", "FM amount",
+    controlspec.new(0, 1, "lin", 0.01, 0.0, ""))
+  params:set_action("fm_amt", function(v)
+    pcall(function() engine.fm_amt(v) end)
+    screen_dirty = true
+  end)
+
   params:add_number("scale", "scale", 1, #SCALES, scale_idx)
   params:set_action("scale", function(v)
     scale_idx = v; rebuild_scale(); screen_dirty = true
@@ -2748,6 +2882,14 @@ function init()
 
   -- BANDMATE
   -- ARC ENGINE
+  params:add_separator("PRESETS")
+  for i = 1, 4 do
+    params:add_trigger("preset_save_" .. i, "save preset " .. i)
+    params:set_action("preset_save_" .. i, function() save_preset(i) end)
+    params:add_trigger("preset_load_" .. i, "load preset " .. i)
+    params:set_action("preset_load_" .. i, function() load_preset(i) end)
+  end
+
   params:add_separator("ARC")
 
   params:add_binary("arc_on", "arc engine", "toggle", 0)
