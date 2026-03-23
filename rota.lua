@@ -349,12 +349,205 @@ local BANDMATE_STYLES = {
     topology_mutate_prob = 0.02,
     voice_toggle_prob = 0.02,
   },
+  {
+    name = "CONDUCTOR",
+    -- Conductor doesn't use these directly — it borrows from other styles
+    chaos_lo = 0.1,  chaos_hi = 0.8,
+    mass_lo  = 0.1,  mass_hi  = 1.0,
+    rough_lo = 0.0,  rough_hi = 0.7,
+    density_lo = 0.2, density_hi = 0.9,
+    evolution_speed   = 0.05,
+    scale_change_prob = 0.0,   -- conductor handles this itself
+    reverb_mix_target = 0.4,
+    reverb_time_target = 4.0,
+    reseed_prob       = 0.0,
+    topology_mutate_prob = 0.0,
+    voice_toggle_prob = 0.0,
+  },
 }
 
 -- Style indices for special behavior
 local STYLE_STEREO    = 7
 local STYLE_CLOCKWORK = 8
 local STYLE_FREERUN   = 9
+local STYLE_CONDUCTOR = 10
+
+-- -----------------------------------------------------------------------
+-- CONDUCTOR: arranges a "song" through movements
+-- Each movement has: a borrowed style, duration, voice count,
+-- scale/root, aggression target, density target.
+-- Transitions between movements: fade out → silence → new movement.
+-- The conductor never repeats the same style twice in a row.
+-- -----------------------------------------------------------------------
+
+local conductor = {
+  active_style = 1,       -- which style we're borrowing right now
+  movement     = 1,       -- current movement number
+  movement_timer = 0,     -- ticks into current movement
+  movement_dur = 0,       -- how long this movement lasts
+  transition   = false,   -- true during fade-out between movements
+  trans_timer  = 0,
+  trans_dur    = 8,       -- ticks for transition
+  history      = {},      -- recent style indices (avoid repeats)
+  song_arc     = 0,       -- 0..1 overall arc of the song
+}
+
+-- Movement templates: the conductor picks from these arcs
+local MOVEMENT_ARCS = {
+  -- {style choices, voice_count, density range, aggression range, duration range, description}
+  {styles={1,5,9},   voices=2, dens={0.2,0.45}, aggro={0.0,0.1},  dur={20,40}, name="INTRO"},
+  {styles={1,2,7},   voices=3, dens={0.35,0.6}, aggro={0.05,0.2}, dur={25,45}, name="DRIFT"},
+  {styles={3,8,2},   voices=5, dens={0.5,0.8},  aggro={0.2,0.4},  dur={20,35}, name="BUILD"},
+  {styles={4,6,3},   voices=7, dens={0.7,1.0},  aggro={0.5,0.85}, dur={15,30}, name="PEAK"},
+  {styles={6,4},     voices=8, dens={0.8,1.0},  aggro={0.7,1.0},  dur={10,20}, name="CLIMAX"},
+  {styles={5,9,1},   voices=3, dens={0.2,0.4},  aggro={0.0,0.1},  dur={20,40}, name="EXHALE"},
+  {styles={7},       voices=4, dens={0.4,0.7},  aggro={0.1,0.3},  dur={20,35}, name="SPATIAL"},
+  {styles={5,1},     voices=2, dens={0.15,0.3}, aggro={0.0,0.05}, dur={15,30}, name="OUTRO"},
+}
+
+-- Song structures: sequences of movement arc indices
+local SONG_STRUCTURES = {
+  {1, 2, 3, 4, 5, 6, 3, 5, 8},          -- classic arc
+  {1, 3, 4, 6, 3, 5, 4, 6, 8},          -- double peak
+  {1, 7, 2, 3, 7, 4, 6, 7, 8},          -- spatial journey
+  {1, 2, 4, 5, 6, 2, 3, 4, 5, 8},       -- slow burn
+  {1, 3, 5, 3, 4, 5, 3, 5, 4, 6, 8},    -- wave pattern
+}
+
+local song_structure = {}
+local song_position = 1
+
+local function conductor_pick_structure()
+  song_structure = SONG_STRUCTURES[math.random(#SONG_STRUCTURES)]
+  song_position = 1
+  conductor.movement = 1
+  conductor.history = {}
+end
+
+local function conductor_start_movement()
+  -- Get the arc for this position
+  local arc_idx = song_structure[song_position] or 1
+  local arc = MOVEMENT_ARCS[arc_idx]
+
+  -- Pick a style from the arc's options, avoiding recent repeats
+  local style_pick
+  for attempt = 1, 10 do
+    style_pick = arc.styles[math.random(#arc.styles)]
+    local dominated = false
+    for _, h in ipairs(conductor.history) do
+      if h == style_pick then dominated = true end
+    end
+    if not dominated or attempt >= 8 then break end
+  end
+
+  -- Record in history (keep last 3)
+  table.insert(conductor.history, style_pick)
+  if #conductor.history > 3 then table.remove(conductor.history, 1) end
+
+  conductor.active_style = style_pick
+  conductor.movement_dur = arc.dur[1] + math.random() * (arc.dur[2] - arc.dur[1])
+  conductor.movement_timer = 0
+  conductor.transition = false
+
+  -- Set voice count
+  local target_voices = arc.voices
+  for i = 1, NUM_VOICES do
+    motors[i].on = (i <= target_voices)
+  end
+
+  -- Set density target
+  density = arc.dens[1] + math.random() * (arc.dens[2] - arc.dens[1])
+  params:set("density", density, true)
+
+  -- Set aggression target
+  aggression = arc.aggro[1] + math.random() * (arc.aggro[2] - arc.aggro[1])
+  params:set("aggression", aggression, true)
+
+  -- Change scale/root on some movements
+  if math.random() < 0.4 then
+    scale_root = 24 + ({0, 2, 3, 5, 7, 8, 10})[math.random(7)]
+    params:set("root", scale_root, true)
+    rebuild_scale()
+  end
+  if math.random() < 0.25 then
+    scale_idx = ({2, 4, 5, 3, 6})[math.random(5)]
+    params:set("scale", scale_idx, true)
+    rebuild_scale()
+  end
+
+  -- Reseed rungler for fresh patterns
+  rungler.reg = math.random(1, 255)
+
+  conductor.song_arc = song_position / #song_structure
+end
+
+local function conductor_transition_out()
+  conductor.transition = true
+  conductor.trans_timer = 0
+  conductor.trans_dur = 6 + math.random(4)
+end
+
+local function conductor_advance()
+  song_position = song_position + 1
+  conductor.movement = conductor.movement + 1
+
+  if song_position > #song_structure then
+    -- Song ended — pick a new structure and restart
+    conductor_pick_structure()
+  end
+
+  conductor_start_movement()
+end
+
+-- Called every bandmate tick (7/4 beats) when CONDUCTOR is active
+local function bandmate_evolve_conductor()
+  if bandmate_style ~= STYLE_CONDUCTOR then return end
+
+  conductor.movement_timer = conductor.movement_timer + 1
+
+  if conductor.transition then
+    -- Fading out between movements
+    conductor.trans_timer = conductor.trans_timer + 1
+    local fade = 1 - (conductor.trans_timer / conductor.trans_dur)
+    fade = math.max(0, fade)
+
+    -- Fade density and aggression to zero
+    density = density * fade
+    aggression = aggression * fade
+    params:set("density", density, true)
+    params:set("aggression", aggression, true)
+
+    -- Brief silence then advance
+    if conductor.trans_timer >= conductor.trans_dur then
+      -- Silence moment
+      for i = 1, NUM_VOICES do gate_off(i) end
+      conductor_advance()
+    end
+    return
+  end
+
+  -- During a movement: borrow the active style's behavior
+  -- Override bandmate_style temporarily for evolve functions
+  local saved_style = bandmate_style
+  bandmate_style = conductor.active_style
+
+  -- Let the borrowed style's param evolution run
+  bandmate_evolve_params()
+  bandmate_pick_voices()
+  bandmate_mutate_topology()
+  bandmate_maybe_reseed()
+  if conductor.active_style == STYLE_STEREO then
+    bandmate_evolve_stereo()
+  end
+
+  -- Restore conductor style
+  bandmate_style = saved_style
+
+  -- Check if movement should end
+  if conductor.movement_timer >= conductor.movement_dur then
+    conductor_transition_out()
+  end
+end
 
 local bandmate_on    = false
 local bandmate_style = 1
@@ -657,6 +850,7 @@ local function bandmate_evolve_params()
     0.2,  -- STEREO: moderate
     0.45, -- CLOCKWORK: punchy
     0.1,  -- FREERUN: gentle
+    0.3,  -- CONDUCTOR: managed by conductor engine
   }
   local aggro_tgt = aggro_targets[bandmate_style] or 0.3
   -- Add variation from chaos
@@ -971,12 +1165,17 @@ local TIMBRE_SPEED = {
   0.3,  -- STEREO: moderate
   0.75, -- CLOCKWORK: snappy, rhythmic
   0.15, -- FREERUN: slow float
+  0.5,  -- CONDUCTOR: adapts to borrowed style
 }
 
 local function bandmate_evolve_timbre()
   local t = bandmate_phase
   local s = get_style()
   local tspeed = TIMBRE_SPEED[bandmate_style] or 0.3
+  -- Conductor adapts to its borrowed style's speed
+  if bandmate_style == STYLE_CONDUCTOR and conductor.active_style then
+    tspeed = TIMBRE_SPEED[conductor.active_style] or 0.3
+  end
 
   -- Decide mode: fast styles use STEP changes, slow use SINE
   local use_steps = tspeed > 0.5
@@ -1255,6 +1454,7 @@ local function setup_lattice()
           bandmate_maybe_reseed()
           bandmate_evolve_stereo()
           bandmate_evolve_tempo()
+          bandmate_evolve_conductor()
         end
       end)
     end,
@@ -1668,6 +1868,15 @@ local function draw_header()
     -- Show stereo phase when in STEREO mode
     if bandmate_style == STYLE_STEREO and stereo.phase then
       sname = sname .. ":" .. STEREO_PHASES[stereo.phase].name
+    end
+    -- Show conductor movement info
+    if bandmate_style == STYLE_CONDUCTOR then
+      local arc_idx = song_structure[song_position] or 1
+      local arc = MOVEMENT_ARCS[arc_idx]
+      local borrowed = BANDMATE_STYLES[conductor.active_style]
+      sname = arc.name
+      if conductor.transition then sname = sname .. ">" end
+      sname = sname .. " " .. conductor.movement
     end
     screen.level(10)
     screen.move(126, 7)
@@ -2118,7 +2327,11 @@ function init()
   params:add_option("bandmate_style", "bandmate style", style_names, 1)
   params:set_action("bandmate_style", function(v)
     bandmate_style = v
-    if v == STYLE_STEREO then stereo_new_phase() end  -- init stereo phases
+    if v == STYLE_STEREO then stereo_new_phase() end
+    if v == STYLE_CONDUCTOR then
+      conductor_pick_structure()
+      conductor_start_movement()
+    end
     -- Reset pans to default spread when leaving STEREO
     if v ~= STYLE_STEREO then
       for i = 1, NUM_VOICES do
