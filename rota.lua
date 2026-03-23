@@ -202,6 +202,30 @@ local octave_shift = 0
 local aggression = 0.0
 
 -- -----------------------------------------------------------------------
+-- GATE PATTERN / RHYTHM SYSTEM
+-- -----------------------------------------------------------------------
+
+-- Gate pattern system
+local gate_patterns = {
+  {1,0,1,0,1,0,1,0},  -- pattern per voice (1=can gate, 0=muted step)
+  {1,1,0,0,1,1,0,0},
+  {1,0,0,1,0,0,1,0},
+  {1,1,1,0,1,0,0,1},
+  {0,1,0,1,0,1,0,1},
+  {1,0,0,0,1,0,0,0},
+  {0,0,1,0,0,0,1,0},
+  {1,0,1,1,0,1,0,0},
+}
+local gate_pattern_len = 8
+local gate_pattern_pos = 0  -- current position in pattern
+local gate_mode = 1  -- 1=FREE (rungler gates), 2=PATTERN (uses gate_patterns), 3=EUCLIDEAN
+local GATE_MODES = {"FREE", "PATTERN", "EUCLID"}
+
+-- Euclidean parameters per voice
+local euclid_hits = {5, 3, 4, 6, 3, 2, 4, 5}
+local euclid_rotation = {0, 1, 0, 2, 3, 0, 1, 0}
+
+-- -----------------------------------------------------------------------
 -- BANDMATE SYSTEM
 -- -----------------------------------------------------------------------
 
@@ -568,8 +592,8 @@ local held_grid = {}
 local screen_dirty = true
 local frame        = 0
 local current_page = 1
-local NUM_PAGES    = 4
-local PAGE_NAMES   = {"MOTORS", "RUNGLER", "SPACE", "CHAOS"}
+local NUM_PAGES    = 5
+local PAGE_NAMES   = {"MOTORS", "RUNGLER", "SPACE", "CHAOS", "RHYTHM"}
 
 -- Global params
 local chaos     = 0.4
@@ -675,6 +699,13 @@ local function rungler_step()
   return rungler.value
 end
 
+-- Euclidean gate helper (Bjorklund algorithm check)
+local function euclidean_gate(hits, len, rot, pos)
+  local p = (pos + rot) % len
+  -- Bjorklund: is step p a hit?
+  return (math.floor(p * hits / len) ~= math.floor(((p + 1) * hits) / len))
+end
+
 -- Per-voice gate decision: uses different rungler bits per voice
 -- This is what creates RHYTHM from chaos
 local function should_voice_gate(v_idx, rung_val)
@@ -686,6 +717,27 @@ local function should_voice_gate(v_idx, rung_val)
   -- Combine with density and per-role density
   local prob = density * role.density
 
+  -- PATTERN mode: gate_patterns filter which steps can sound
+  if gate_mode == 2 then
+    local pat = gate_patterns[v_idx]
+    if pat then
+      local step_val = pat[(gate_pattern_pos % gate_pattern_len) + 1]
+      if step_val == 0 then return false end
+    end
+    return math.random() < prob
+  end
+
+  -- EUCLIDEAN mode: use Bjorklund pattern
+  if gate_mode == 3 then
+    local hits = util.clamp(euclid_hits[v_idx] or 4, 0, gate_pattern_len)
+    local rot = euclid_rotation[v_idx] or 0
+    if not euclidean_gate(hits, gate_pattern_len, rot, gate_pattern_pos) then
+      return false
+    end
+    return math.random() < prob
+  end
+
+  -- FREE mode (default): rungler bits gate
   -- Gate bit provides rhythmic structure
   -- When gate_bit = 1: high probability of sounding
   -- When gate_bit = 0: still possible (ghost notes / fills)
@@ -1331,6 +1383,7 @@ local function setup_lattice()
         rungler.step_acc = rungler.step_acc - 1.0
 
         local rung = rungler_step()
+        gate_pattern_pos = (gate_pattern_pos + 1) % gate_pattern_len
         local step = rungler.step_count
 
         -- Process each voice independently
@@ -1747,6 +1800,47 @@ function enc(n, d)
         pcall(function() engine.inertia(i - 1, motors[i].inertia) end)
       end
     end
+
+  elseif current_page == 5 then
+    -- RHYTHM: E2=cycle gate mode, E3=mode-specific
+    if n == 2 then
+      if d > 0 then
+        gate_mode = (gate_mode % #GATE_MODES) + 1
+      elseif d < 0 then
+        gate_mode = gate_mode - 1
+        if gate_mode < 1 then gate_mode = #GATE_MODES end
+      end
+    elseif n == 3 then
+      if gate_mode == 1 then
+        -- FREE: E3 adjusts density
+        density = util.clamp(density + d * 0.02, 0.0, 1.0)
+        params:set("density", density, true)
+      elseif gate_mode == 2 then
+        -- PATTERN: cycle preset patterns for all voices
+        if d > 0 then
+          for i = 1, NUM_VOICES do
+            -- Rotate pattern right
+            local pat = gate_patterns[i]
+            local last = pat[gate_pattern_len]
+            for s = gate_pattern_len, 2, -1 do pat[s] = pat[s - 1] end
+            pat[1] = last
+          end
+        else
+          for i = 1, NUM_VOICES do
+            -- Rotate pattern left
+            local pat = gate_patterns[i]
+            local first = pat[1]
+            for s = 1, gate_pattern_len - 1 do pat[s] = pat[s + 1] end
+            pat[gate_pattern_len] = first
+          end
+        end
+      elseif gate_mode == 3 then
+        -- EUCLID: change hits proportionally
+        for i = 1, NUM_VOICES do
+          euclid_hits[i] = util.clamp(euclid_hits[i] + d, 0, gate_pattern_len)
+        end
+      end
+    end
   end
   screen_dirty = true
 end
@@ -1823,6 +1917,29 @@ function key(n, z)
           end
         end
         params:set("octave_shift", octave_shift, true)
+      elseif current_page == 5 then
+        -- RHYTHM: K3 action depends on gate mode
+        if gate_mode == 1 then
+          -- FREE: randomize density
+          density = math.random() * 0.8 + 0.1
+          params:set("density", density, true)
+        elseif gate_mode == 2 then
+          -- PATTERN: randomize all patterns
+          for i = 1, NUM_VOICES do
+            for s = 1, gate_pattern_len do
+              gate_patterns[i][s] = math.random() < 0.5 and 1 or 0
+            end
+            -- Ensure at least one hit
+            if gate_patterns[i][math.random(1, gate_pattern_len)] == 0 then
+              gate_patterns[i][math.random(1, gate_pattern_len)] = 1
+            end
+          end
+        elseif gate_mode == 3 then
+          -- EUCLID: randomize rotations
+          for i = 1, NUM_VOICES do
+            euclid_rotation[i] = math.random(0, gate_pattern_len - 1)
+          end
+        end
       end
     end
   end
@@ -1830,7 +1947,7 @@ function key(n, z)
 end
 
 -- -----------------------------------------------------------------------
--- SCREEN — 4 pages, navigate with E1
+-- SCREEN — 5 pages, navigate with E1
 -- -----------------------------------------------------------------------
 
 -- Shared: draw header bar on all pages
@@ -1923,7 +2040,7 @@ local function draw_big_param(label, value, fmt, x, y)
   screen.text(string.format(fmt, value))
 end
 
--- PAGE 1: MOTORS — the 8 motor bars, performance view
+-- PAGE 1: MOTORS — spinning disc visualization inspired by Motor Synth MKII
 local function draw_page_motors()
   -- Hints
   screen.level(4)
@@ -1956,51 +2073,96 @@ local function draw_page_motors()
   screen.move(110, 34)
   screen.text_right(SCALES[scale_idx])
 
-  -- Motor bars across bottom
-  local bar_w = 13
-  local bar_h = 28
-  local y_base = 63
-  local x_start = 2
-  local gap = 1
+  -- Pitch frequency lines (piano roll area: y 21-32)
+  local pitch_y_top = 21
+  local pitch_y_bot = 32
+  for i = 1, NUM_VOICES do
+    local m = motors[i]
+    if m.on and m.target_freq and m.target_freq > 0 then
+      -- Map MIDI note range to y position
+      local nn = util.clamp((m.target_freq - 24) / 72, 0, 1)
+      local py = pitch_y_bot - math.floor(nn * (pitch_y_bot - pitch_y_top))
+      local px = 2 + (i - 1) * 16
+      screen.level(m.gated and 15 or (m.on and 5 or 1))
+      screen.move(px, py)
+      screen.line(px + 12, py)
+      screen.stroke()
+      -- Bright dot at center when gated
+      if m.gated then
+        screen.level(15)
+        screen.pixel(px + 6, py)
+        screen.fill()
+      end
+    end
+  end
+
+  -- 8 spinning disc circles (y 34-63, center ~y49, radius 6)
+  local disc_r = 6
+  local disc_y = 49
+  local disc_gap = 16
+  local disc_x_start = 8
 
   for i = 1, NUM_VOICES do
-    local x = x_start + (i - 1) * (bar_w + gap)
+    local cx = disc_x_start + (i - 1) * disc_gap
     local m = motors[i]
-    local role = VOICE_ROLES[i]
 
-    -- Role marker above bar
-    if role.name == "bass" then
-      screen.level(m.on and 8 or 2)
-      screen.rect(x, y_base - bar_h - 2, bar_w, 1)
-      screen.fill()
-    elseif role.name == "high" then
-      screen.level(m.on and 5 or 2)
-      screen.pixel(x + 3, y_base - bar_h - 2)
-      screen.pixel(x + 6, y_base - bar_h - 2)
-      screen.pixel(x + 9, y_base - bar_h - 2)
+    -- Rotation angle driven by frequency and frame counter
+    local freq_factor = 0
+    if m.target_freq and m.target_freq > 0 then
+      freq_factor = m.target_freq / 200  -- higher pitch = faster spin
+    end
+    local angle = frame * freq_factor * 0.3
+
+    -- Circle border brightness based on state
+    if m.gated then
+      screen.level(15)
+    elseif m.on then
+      screen.level(4)
+    else
+      screen.level(1)
+    end
+
+    -- Draw circle border (approximate with 12 points)
+    for s = 0, 11 do
+      local a1 = (s / 12) * 2 * math.pi
+      local a2 = ((s + 1) / 12) * 2 * math.pi
+      screen.move(cx + math.cos(a1) * disc_r, disc_y + math.sin(a1) * disc_r)
+      screen.line(cx + math.cos(a2) * disc_r, disc_y + math.sin(a2) * disc_r)
+      screen.stroke()
+    end
+
+    -- Amplitude arc fill when gated (pie wedge)
+    if m.gated and m.amp and m.amp > 0 then
+      local fill_angle = util.clamp(m.amp / 0.45, 0, 1) * 2 * math.pi
+      screen.level(6)
+      for s = 0, 7 do
+        local a = angle + (s / 8) * fill_angle
+        local r_inner = disc_r * 0.3
+        local r_outer = disc_r - 1
+        screen.pixel(
+          math.floor(cx + math.cos(a) * (r_inner + (r_outer - r_inner) * (s / 8))),
+          math.floor(disc_y + math.sin(a) * (r_inner + (r_outer - r_inner) * (s / 8)))
+        )
+      end
       screen.fill()
     end
 
-    -- Border: flashes on gate
-    screen.level(m.gated and 12 or (m.on and 4 or 1))
-    screen.rect(x, y_base - bar_h, bar_w, bar_h)
-    screen.stroke()
-
-    -- Fill: amplitude
-    local amp = (m.on and m.gated) and m.amp or 0
-    local h = math.floor(amp / 0.45 * bar_h)
-    if h > 0 then
-      screen.level(m.gated and 15 or 3)
-      screen.rect(x + 1, y_base - h, bar_w - 2, h)
-      screen.fill()
+    -- Rotating line (clock hand) inside disc
+    if m.on then
+      local lx = math.cos(angle) * (disc_r - 2)
+      local ly = math.sin(angle) * (disc_r - 2)
+      screen.level(m.gated and 12 or 3)
+      screen.move(cx, disc_y)
+      screen.line(cx + lx, disc_y + ly)
+      screen.stroke()
     end
 
-    -- Frequency dot
-    if m.on and m.target_freq and m.target_freq > 0 then
-      local nn = util.clamp((m.target_freq - 24) / 60, 0, 1)
-      local dy = y_base - 2 - math.floor(nn * (bar_h - 4))
-      screen.level(m.gated and 15 or 6)
-      screen.rect(x + math.floor(bar_w / 2) - 1, dy, 3, 1)
+    -- Orbiting dot when gated
+    if m.gated then
+      local ox = math.cos(angle) * (disc_r - 1)
+      local oy = math.sin(angle) * (disc_r - 1)
+      screen.level(15)
+      screen.pixel(math.floor(cx + ox), math.floor(disc_y + oy))
       screen.fill()
     end
   end
@@ -2192,6 +2354,103 @@ local function draw_page_chaos()
   screen.text(SCALES[scale_idx] .. " oct:" .. oct_str)
 end
 
+-- PAGE 5: RHYTHM — gate pattern controls
+local function draw_page_rhythm()
+  -- Top hints
+  screen.level(4)
+  screen.move(2, 18)
+  screen.font_size(8)
+  screen.text("E2 mode")
+  screen.level(12)
+  screen.move(50, 18)
+  screen.text(GATE_MODES[gate_mode])
+
+  screen.level(4)
+  screen.move(80, 18)
+  if gate_mode == 1 then
+    screen.text("E3 density")
+  elseif gate_mode == 2 then
+    screen.text("E3 preset")
+  else
+    screen.text("E3 hits")
+  end
+
+  -- K hints
+  screen.level(3)
+  screen.move(2, 63)
+  screen.font_size(7)
+  screen.text("K2 " .. (playing and "stop" or "play"))
+  screen.move(126, 63)
+  if gate_mode == 1 then
+    screen.text_right("K3 rnd density")
+  elseif gate_mode == 2 then
+    screen.text_right("K3 rnd patterns")
+  else
+    screen.text_right("K3 rnd rotations")
+  end
+
+  -- Pattern visualization: 8 columns x 8 rows
+  local col_w = 14
+  local col_x_start = 4
+  local row_y_start = 24
+  local row_h = 4
+  local dot_r = 1
+
+  for i = 1, NUM_VOICES do
+    local cx = col_x_start + (i - 1) * col_w + 5
+
+    for step = 0, gate_pattern_len - 1 do
+      local ry = row_y_start + step * row_h
+      local is_current = (step == gate_pattern_pos)
+      local is_active = false
+
+      if gate_mode == 2 then
+        -- PATTERN mode: show pattern
+        local pat = gate_patterns[i]
+        is_active = (pat and pat[step + 1] == 1)
+      elseif gate_mode == 3 then
+        -- EUCLID mode: compute euclidean pattern
+        local hits = util.clamp(euclid_hits[i] or 4, 0, gate_pattern_len)
+        local rot = euclid_rotation[i] or 0
+        is_active = euclidean_gate(hits, gate_pattern_len, rot, step)
+      else
+        -- FREE mode: show rungler bit state per voice
+        local gate_bit = (rungler.reg >> ((i - 1) % 8)) & 1
+        is_active = (gate_bit == 1)
+      end
+
+      if is_current then
+        -- Current step: bright highlight
+        screen.level(is_active and 15 or 6)
+        screen.rect(cx - 2, ry, 5, 3)
+        screen.fill()
+      elseif is_active then
+        screen.level(10)
+        screen.rect(cx - 1, ry, 3, 2)
+        screen.fill()
+      else
+        screen.level(2)
+        screen.pixel(cx, ry)
+        screen.fill()
+      end
+    end
+
+    -- Euclid hits/len below columns
+    if gate_mode == 3 then
+      screen.level(6)
+      screen.move(cx - 3, 58)
+      screen.font_size(7)
+      screen.text(tostring(util.clamp(euclid_hits[i] or 4, 0, gate_pattern_len)))
+    end
+
+    -- Voice number label at top of column
+    screen.level(motors[i].gated and 15 or (motors[i].on and 6 or 2))
+    screen.move(cx - 1, 22)
+    screen.font_size(7)
+    screen.text(tostring(i))
+  end
+end
+
 function redraw()
   if not screen_dirty then return end
   screen_dirty = false
@@ -2209,6 +2468,8 @@ function redraw()
     draw_page_space()
   elseif current_page == 4 then
     draw_page_chaos()
+  elseif current_page == 5 then
+    draw_page_rhythm()
   end
 
   screen.update()
