@@ -194,6 +194,13 @@ local quantize    = true
 -- Density control: global gate probability multiplier
 local density = 0.7  -- 0=silence, 1=full density
 
+-- Octave range: shifts all voices up/down (-2 to +2 octaves)
+local octave_shift = 0
+
+-- Aggression: 0=gentle, 1=maximum brutality
+-- Scales drive, grind, amp, density, and reduces reverb
+local aggression = 0.0
+
 -- -----------------------------------------------------------------------
 -- BANDMATE SYSTEM
 -- -----------------------------------------------------------------------
@@ -494,7 +501,7 @@ end
 -- Each voice has its own register, range, and character
 local function rungler_to_midi(v_idx, rung_val)
   local role = VOICE_ROLES[v_idx]
-  local base = scale_root + (role.base_oct * 12)
+  local base = scale_root + ((role.base_oct + octave_shift) * 12)
   local range = role.range
 
   -- Each voice reads the register differently for independence
@@ -527,12 +534,16 @@ end
 -- When bandmate is active, drive/rolloff/phase_noise are managed by
 -- bandmate_evolve_timbre independently, so we only set grind here.
 local function update_globals()
-  pcall(function() engine.grind(roughness) end)
+  -- Aggression adds to grind and drive globally
+  local eff_grind = roughness + aggression * 0.3
+  pcall(function() engine.grind(util.clamp(eff_grind, 0, 1)) end)
   if not bandmate_on then
-    -- Manual mode: derive everything from roughness
-    pcall(function() engine.phase_noise(roughness * 0.04) end)
-    pcall(function() engine.drive(0.1 + roughness * 0.3) end)
-    pcall(function() engine.rolloff(12000 - (roughness * 5000)) end)
+    -- Manual mode: derive from roughness + aggression
+    local eff_drive = 0.1 + roughness * 0.3 + aggression * 0.4
+    local eff_rolloff = 12000 - (roughness * 5000) + aggression * 4000
+    pcall(function() engine.phase_noise(roughness * 0.04 + aggression * 0.02) end)
+    pcall(function() engine.drive(util.clamp(eff_drive, 0, 1)) end)
+    pcall(function() engine.rolloff(util.clamp(eff_rolloff, 2000, 16000)) end)
   end
 end
 
@@ -629,11 +640,30 @@ local function bandmate_evolve_params()
   roughness = util.clamp(roughness, 0.0, 1.0)
   density   = util.clamp(density, 0.0, 1.0)
 
+  -- Aggression evolves per style (heavy styles push it up)
+  local aggro_targets = {
+    0.1,  -- DRIFT: gentle
+    0.3,  -- SURGE: builds
+    0.5,  -- SWARM: moderate
+    0.65, -- BLASSER: heavy
+    0.05, -- GLACIAL: barely there
+    0.8,  -- RUPTURE: brutal
+    0.2,  -- STEREO: moderate
+    0.45, -- CLOCKWORK: punchy
+    0.1,  -- FREERUN: gentle
+  }
+  local aggro_tgt = aggro_targets[bandmate_style] or 0.3
+  -- Add variation from chaos
+  aggro_tgt = aggro_tgt + math.sin(bandmate_phase * 0.6) * 0.15
+  aggression = aggression + (aggro_tgt - aggression) * 0.04
+  aggression = util.clamp(aggression, 0.0, 1.0)
+
   rungler.feedback = chaos
   update_globals()
   params:set("chaos", chaos, true)
   params:set("mass", mass, true)
   params:set("roughness", roughness, true)
+  params:set("aggression", aggression, true)
 end
 
 local function bandmate_pick_voices()
@@ -1080,18 +1110,21 @@ local function setup_lattice()
               pcall(function() engine.inertia(i - 1, note_inertia) end)
               m.inertia = note_inertia
 
-              -- Grind per-note: bit 5 + rungler value
+              -- Grind per-note: bit 5 + rungler value + aggression boost
               local note_grind = ((shifted >> 5) & 0x01) * 0.3 + rung * roughness * 0.4
+              note_grind = note_grind + aggression * 0.4
+              note_grind = util.clamp(note_grind, 0.0, 1.0)
               pcall(function() engine.grind_v(i - 1, note_grind) end)
               m.grind = note_grind
 
-              -- FX send per-note: bits 6-7 (dry/light/medium/drenched)
+              -- FX send per-note: aggression = drier (less reverb wash)
               local fx_bits = (shifted >> 6) & 0x03
               local note_fx = ({0.1, 0.25, 0.45, 0.75})[fx_bits + 1]
+              note_fx = note_fx * (1 - aggression * 0.5)  -- aggression dries it out
               pcall(function() engine.fx_send(i - 1, note_fx) end)
 
-              -- Phase noise per-note: from rungler value
-              local note_pn = rung * 0.03 + roughness * 0.01
+              -- Phase noise per-note: aggression adds electromagnetic chaos
+              local note_pn = rung * 0.03 + roughness * 0.01 + aggression * 0.025
               pcall(function() engine.phase_noise_v(i - 1, note_pn) end)
 
               -- Amp lag per-note: bit 2 = snappy or smooth gate
@@ -1102,8 +1135,10 @@ local function setup_lattice()
               -- Accent when bits 0+1+2 are all 1 (12.5% probability, patterned not random)
               local accent = (shifted & 0x07) == 0x07
               local vel_raw = role.amp_lo + rung * (role.amp_hi - role.amp_lo)
-              if accent then vel_raw = vel_raw * 1.6 end
-              m.amp = util.clamp(vel_raw, 0.0, 0.7)
+              -- Aggression boosts amp and makes accents harder
+              vel_raw = vel_raw * (1 + aggression * 0.6)
+              if accent then vel_raw = vel_raw * (1.4 + aggression * 0.4) end
+              m.amp = util.clamp(vel_raw, 0.0, 0.85)
 
               -- ---- GATE LENGTH varies: short=staccato, long=legato ----
               local gate_var = (shifted & 0x03)  -- 0-3 variation
@@ -1388,13 +1423,13 @@ function enc(n, d)
     current_page = util.clamp(current_page + d, 1, NUM_PAGES)
 
   elseif current_page == 1 then
-    -- MOTORS: E2=density, E3=roughness/grind
+    -- MOTORS: E2=density, E3=aggression
     if n == 2 then
       density = util.clamp(density + d * 0.02, 0.0, 1.0)
       params:set("density", density, true)
     elseif n == 3 then
-      roughness = util.clamp(roughness + d * 0.02, 0.0, 1.0)
-      params:set("roughness", roughness, true)
+      aggression = util.clamp(aggression + d * 0.02, 0.0, 1.0)
+      params:set("aggression", aggression, true)
       update_globals()
     end
 
@@ -1509,14 +1544,21 @@ function key(n, z)
           pcall(function() engine.grind_v(i - 1, motors[i].grind) end)
         end
       elseif current_page == 4 then
-        -- CHAOS: toggle bandmate on/off
-        bandmate_on = not bandmate_on
-        params:set("bandmate_on", bandmate_on and 2 or 1, true)
-        if bandmate_on then
-          for i = 1, NUM_VOICES do
-            motors[i].on = (i <= 3) or (math.random() < 0.3)
+        -- CHAOS: cycle octave shift (-2 to +2, then toggles bandmate)
+        if octave_shift < 2 then
+          octave_shift = octave_shift + 1
+        else
+          octave_shift = -2
+          -- Also toggle bandmate when wrapping
+          bandmate_on = not bandmate_on
+          params:set("bandmate_on", bandmate_on and 2 or 1, true)
+          if bandmate_on then
+            for i = 1, NUM_VOICES do
+              motors[i].on = (i <= 3) or (math.random() < 0.3)
+            end
           end
         end
+        params:set("octave_shift", octave_shift, true)
       end
     end
   end
@@ -1616,7 +1658,7 @@ local function draw_page_motors()
   screen.font_size(8)
   screen.text("E2 density")
   screen.move(68, 18)
-  screen.text("E3 grind")
+  screen.text("E3 aggro")
 
   -- Values
   screen.level(12)
@@ -1624,7 +1666,13 @@ local function draw_page_motors()
   screen.font_size(8)
   screen.text(string.format("%.0f%%", density * 100))
   screen.move(68, 27)
-  screen.text(string.format("%.0f%%", roughness * 100))
+  screen.text(string.format("%.0f%%", aggression * 100))
+
+  -- Octave indicator
+  screen.level(octave_shift ~= 0 and 10 or 4)
+  screen.move(110, 27)
+  local oct_str = octave_shift > 0 and ("+" .. octave_shift) or tostring(octave_shift)
+  screen.text_right("oct" .. oct_str)
 
   -- K2/K3 hints + scale
   screen.level(3)
@@ -1855,13 +1903,20 @@ local function draw_page_chaos()
   screen.font_size(7)
   screen.text("K2 " .. (playing and "stop" or "play"))
   screen.move(126, 63)
-  screen.text_right("K3 " .. (bandmate_on and "bm:ON" or "bm:OFF"))
+  screen.text_right("K3 oct/bm:" .. (bandmate_on and "ON" or "OFF"))
 
-  -- Large param displays (2x2 grid)
-  draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 28)
-  draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 28)
-  draw_big_param("GRIND", roughness * 100, "%.0f%%", 4, 46)
-  draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 46)
+  -- Large param displays (2x3 grid)
+  draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 27)
+  draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 27)
+  draw_big_param("AGGRO", aggression * 100, "%.0f%%", 4, 43)
+  draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 43)
+
+  -- Octave + scale
+  screen.level(5)
+  screen.move(4, 58)
+  screen.font_size(7)
+  local oct_str = octave_shift > 0 and ("+" .. octave_shift) or tostring(octave_shift)
+  screen.text(SCALES[scale_idx] .. " oct:" .. oct_str)
 end
 
 function redraw()
@@ -1917,6 +1972,17 @@ function init()
     controlspec.new(0, 1, "lin", 0.01, 0.7, ""))
   params:set_action("density", function(v)
     density = v; screen_dirty = true
+  end)
+
+  params:add_number("octave_shift", "octave shift", -2, 2, 0)
+  params:set_action("octave_shift", function(v)
+    octave_shift = v; screen_dirty = true
+  end)
+
+  params:add_control("aggression", "aggression",
+    controlspec.new(0, 1, "lin", 0.01, 0.0, ""))
+  params:set_action("aggression", function(v)
+    aggression = v; update_globals(); screen_dirty = true
   end)
 
   params:add_control("rev_time", "reverb time",
