@@ -1209,8 +1209,8 @@ function init()
   -- ---- MIDI OUT PARAMS ----
   params:add_separator("MIDI OUT")
 
-  params:add_midi("midi_out", "midi out device")
-  params:set_action("midi_out", function(v)
+  params:add_number("midi_out_dev", "midi out device", 1, 16, 1)
+  params:set_action("midi_out_dev", function(v)
     midi_all_notes_off()
     midi_out_device = midi.connect(v)
   end)
