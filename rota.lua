@@ -228,7 +228,7 @@ end
 
 local function quantize_midi(midi_note)
   if not quantize then return midi_note end
-  return musicutil.snap_note_to_scale(midi_note, scale_notes)
+  return musicutil.snap_note_to_array(midi_note, scale_notes)
 end
 
 local function midi_to_hz(n)
@@ -559,7 +559,7 @@ local function setup_lattice()
   -- MAIN CLOCK: rungler step + voice gating (1/8 = 16th notes)
   auto_lattice:new_sprocket({
     action = function(t)
-      pcall(function()
+      local ok, err = pcall(function()
         -- Speed accumulator
         rungler.step_acc = rungler.step_acc + rungler.speed
         if rungler.step_acc < 1.0 then
@@ -615,7 +615,8 @@ local function setup_lattice()
 
               -- Send to engine: fast spin-up, then freq+amp
               gate_on_lag(i)
-              engine.freq(i - 1, midi_to_hz(midi_note))
+              local hz = midi_to_hz(midi_note)
+              engine.freq(i - 1, hz)
               engine.amp(i - 1, m.amp)
 
               -- MIDI out
@@ -634,6 +635,7 @@ local function setup_lattice()
 
         screen_dirty = true
       end)
+      if not ok then print("[rota] clock error: " .. tostring(err)) end
     end,
     division = 1 / 8,
     enabled  = true
@@ -692,6 +694,7 @@ local function setup_lattice()
   })
 
   auto_lattice:start()
+  print("[rota] lattice started OK")
 end
 
 -- -----------------------------------------------------------------------
@@ -1192,6 +1195,10 @@ function init()
     motors[i].on = (i <= 3)
     motors[i].amp = 0.0
     motors[i].gated = false
+  end
+
+  -- Send initial state to engine
+  for i = 1, NUM_VOICES do
     send_voice(i)
   end
 
