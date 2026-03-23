@@ -49,7 +49,7 @@ local NUM_VOICES = 8
 
 -- Rungler state (8-bit shift register, mirroring the SC engine concept)
 local rungler = {
-  reg        = 0b10110100,   -- initial seed
+  reg        = 180,           -- initial seed (0b10110100)
   freq1      = 40,           -- data oscillator
   freq2      = 7,            -- clock oscillator
   phase1     = 0,
