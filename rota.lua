@@ -358,6 +358,206 @@ local save_preset   -- forward declare
 local load_preset   -- forward declare
 
 -- -----------------------------------------------------------------------
+-- SCENE MORPH: crossfade between two preset slots over time
+-- -----------------------------------------------------------------------
+local morph = {
+  active = false,
+  source = 1,      -- preset slot A
+  target = 2,      -- preset slot B
+  position = 0.0,  -- 0=fully A, 1=fully B
+  speed = 0.02,    -- how fast morph advances per tick
+}
+
+local function morph_tick()
+  if not morph.active then return end
+  if not presets[morph.source] or not next(presets[morph.source]) then return end
+  if not presets[morph.target] or not next(presets[morph.target]) then return end
+
+  morph.position = morph.position + morph.speed
+  if morph.position >= 1.0 then
+    morph.position = 1.0
+    morph.active = false
+  end
+
+  local t = morph.position
+  for _, id in ipairs(PRESET_PARAMS) do
+    local a = presets[morph.source][id]
+    local b = presets[morph.target][id]
+    if a and b then
+      local v = a + (b - a) * t
+      params:set(id, v)
+    end
+  end
+end
+
+-- -----------------------------------------------------------------------
+-- VOICE FREEZE: holds current pitches while timbre keeps evolving
+-- -----------------------------------------------------------------------
+local voice_freeze = false
+local frozen_notes = {}
+for i = 1, 8 do frozen_notes[i] = nil end
+
+-- -----------------------------------------------------------------------
+-- SOFTCUT TAPE: records ROTA output and plays it back warped
+-- Uses softcut voice 1 for recording, voice 2 for playback
+-- -----------------------------------------------------------------------
+local tape = {
+  on = false,
+  rate = 1.0,         -- playback rate (0.5=half speed, -1=reverse)
+  level = 0.3,        -- playback level
+  rec_level = 0.8,    -- recording level
+  feedback = 0.5,     -- how much playback feeds back to recording
+  position = 0,       -- current playback position
+}
+
+local function tape_init()
+  -- Voice 1: record from output
+  softcut.enable(1, 1)
+  softcut.buffer(1, 1)
+  softcut.level(1, 0)  -- silent recording head
+  softcut.rate(1, 1)
+  softcut.rec(1, 1)
+  softcut.rec_level(1, tape.rec_level)
+  softcut.pre_level(1, tape.feedback)
+  softcut.loop(1, 1)
+  softcut.loop_start(1, 1)
+  softcut.loop_end(1, 17)  -- 16 seconds of buffer
+  softcut.position(1, 1)
+  softcut.level_input_cut(1, 1, 0)
+  softcut.level_input_cut(2, 1, 0)
+  -- Record from engine output
+  audio.level_eng_cut(tape.rec_level)
+  softcut.play(1, 1)
+
+  -- Voice 2: playback (warped)
+  softcut.enable(2, 1)
+  softcut.buffer(2, 1)  -- same buffer
+  softcut.level(2, tape.level)
+  softcut.rate(2, tape.rate)
+  softcut.rec(2, 0)  -- no recording
+  softcut.loop(2, 1)
+  softcut.loop_start(2, 1)
+  softcut.loop_end(2, 17)
+  softcut.position(2, 5)  -- offset from recorder
+  softcut.play(2, 1)
+end
+
+local function tape_set_rate(r)
+  tape.rate = r
+  if tape.on then
+    softcut.rate(2, r)
+  end
+end
+
+local function tape_set_level(l)
+  tape.level = l
+  if tape.on then
+    softcut.level(2, l)
+  end
+end
+
+local function tape_toggle()
+  tape.on = not tape.on
+  if tape.on then
+    tape_init()
+  else
+    softcut.play(1, 0)
+    softcut.play(2, 0)
+    softcut.rec(1, 0)
+    audio.level_eng_cut(0)
+  end
+end
+
+-- -----------------------------------------------------------------------
+-- SCALE MEMORY: voice-leading aware scale progressions
+-- Prefers scales that share notes with the current one
+-- -----------------------------------------------------------------------
+local SCALE_PROGRESSIONS = {
+  -- Each row: {from_scale_idx, {good_next_scale_indices}}
+  -- Based on shared-note affinity
+  {2, {4, 5, 3}},     -- minor -> dorian, pentatonic, major
+  {3, {2, 4, 5}},     -- major -> minor, dorian, pentatonic
+  {4, {2, 5, 3}},     -- dorian -> minor, pentatonic, major
+  {5, {2, 4, 7}},     -- pentatonic -> minor, dorian, phrygian
+  {6, {1, 5, 7}},     -- whole tone -> chromatic, pentatonic, phrygian
+  {7, {2, 6, 4}},     -- phrygian -> minor, whole tone, dorian
+  {1, {2, 3, 5}},     -- chromatic -> minor, major, pentatonic
+}
+
+-- Good root movements (intervals that create smooth modulations)
+local GOOD_ROOT_MOVES = {0, 2, 3, 5, 7, -5, -3, -2}
+
+local function smart_scale_change()
+  -- Find good next scales for current scale
+  local good_next = nil
+  for _, row in ipairs(SCALE_PROGRESSIONS) do
+    if row[1] == scale_idx then
+      good_next = row[2]
+      break
+    end
+  end
+
+  if good_next and #good_next > 0 then
+    scale_idx = good_next[math.random(#good_next)]
+  else
+    scale_idx = ({2, 3, 4, 5})[math.random(4)]  -- fallback
+  end
+  scale_idx = util.clamp(scale_idx, 1, #SCALES)
+  params:set("scale", scale_idx, true)
+  rebuild_scale()
+end
+
+local function smart_root_change()
+  -- Move root by a musically sensible interval
+  local move = GOOD_ROOT_MOVES[math.random(#GOOD_ROOT_MOVES)]
+  scale_root = util.clamp(scale_root + move, 24, 48)
+  params:set("root", scale_root, true)
+  rebuild_scale()
+end
+
+-- -----------------------------------------------------------------------
+-- INPUT REACTIVITY: audio input modulates ROTA parameters
+-- Input amplitude drives density, chaos, or aggression
+-- -----------------------------------------------------------------------
+local input_react = {
+  on = false,
+  level = 0,           -- current smoothed input level
+  target = "density",  -- what input modulates: "density", "chaos", "aggression"
+  sensitivity = 0.5,   -- how much input affects the target
+  smooth = 0.3,        -- smoothing factor
+}
+
+local input_poll = nil
+
+local function input_react_init()
+  if input_poll then input_poll:stop() end
+  input_poll = poll.set("amp_in_l")
+  input_poll.time = 0.05
+  input_poll.callback = function(val)
+    if not input_react.on then return end
+    -- Smooth the input level
+    input_react.level = input_react.level + (val - input_react.level) * input_react.smooth
+    local amt = input_react.level * input_react.sensitivity * 4  -- scale up
+    amt = util.clamp(amt, 0, 1)
+
+    -- Apply to target parameter
+    if input_react.target == "density" then
+      density = util.clamp(0.2 + amt * 0.8, 0.05, 1.0)
+      params:set("density", density, true)
+    elseif input_react.target == "chaos" then
+      chaos = util.clamp(amt, 0, 1)
+      rungler.feedback = chaos
+      params:set("chaos", chaos, true)
+    elseif input_react.target == "aggression" then
+      aggression = util.clamp(amt, 0, 1)
+      params:set("aggression", aggression, true)
+      update_globals()
+    end
+  end
+  input_poll:start()
+end
+
+-- -----------------------------------------------------------------------
 -- GATE PATTERN / RHYTHM SYSTEM
 -- -----------------------------------------------------------------------
 
@@ -1149,15 +1349,15 @@ local function bandmate_evolve_harmony()
       end
       scale_idx = math.random(1, #SCALES)
     else
-      scale_idx = ({2, 2, 4, 4, 5, 5, 3})[math.random(7)]
+      smart_scale_change()
     end
-    params:set("scale", scale_idx, true)
-    rebuild_scale()
+    if bandmate_style == 5 or bandmate_style == 4 then
+      params:set("scale", scale_idx, true)
+      rebuild_scale()
+    end
   end
   if math.random() < s.scale_change_prob * 0.5 then
-    scale_root = 24 + ({0, 2, 3, 5, 7, 8, 10})[math.random(7)]
-    params:set("root", scale_root, true)
-    rebuild_scale()
+    smart_root_change()
   end
 end
 
@@ -1696,8 +1896,15 @@ local function setup_lattice()
               local gate_var = (shifted & 0x03)  -- 0-3 variation
               m.gate_counter = math.max(1, role.gate_len + gate_var - 1)
 
+              -- Voice freeze: hold pitch if frozen, only update timbre
+              if voice_freeze and frozen_notes[i] then
+                midi_note = frozen_notes[i]
+              end
               -- Set target and gate
               m.target_freq = midi_note
+              if not voice_freeze then
+                frozen_notes[i] = midi_note
+              end
               m.gated = true
 
               -- Send freq + amp
@@ -1768,6 +1975,7 @@ local function setup_lattice()
           bandmate_evolve_timbre()
           opxy_update_ccs()
         end
+        morph_tick()
       end)
     end,
     division = 11 / 4,
@@ -2116,12 +2324,12 @@ function key(n, z)
     if z == 1 then
       -- KEY3 press: page-specific action
       if current_page == 1 then
-        -- MOTORS: randomize which voices are on
-        for i = 1, NUM_VOICES do
-          motors[i].on = math.random() < density
-          if not motors[i].on then gate_off(i) end
+        -- MOTORS: toggle voice freeze
+        voice_freeze = not voice_freeze
+        if not voice_freeze then
+          -- Unfreeze: clear frozen notes so rungler takes over
+          for vi = 1, NUM_VOICES do frozen_notes[vi] = nil end
         end
-        if not motors[1].on then motors[1].on = true end
       elseif current_page == 2 then
         -- RUNGLER: reseed
         rungler.reg = math.random(1, 255)
@@ -2329,7 +2537,7 @@ local function draw_page_motors()
   screen.level(3)
   screen.move(2, 34)
   screen.font_size(7)
-  screen.text("K2 " .. (playing and "stop" or "play") .. "  K3 revoice")
+  screen.text("K2 " .. (playing and "stop" or "play") .. "  K3 " .. (voice_freeze and "FROZEN" or "freeze"))
   screen.level(5)
   screen.move(110, 34)
   screen.text_right(SCALES[scale_idx])
@@ -2890,6 +3098,19 @@ function init()
     params:set_action("preset_load_" .. i, function() load_preset(i) end)
   end
 
+  params:add_number("morph_source", "morph from slot", 1, 4, 1)
+  params:set_action("morph_source", function(v) morph.source = v end)
+  params:add_number("morph_target", "morph to slot", 1, 4, 2)
+  params:set_action("morph_target", function(v) morph.target = v end)
+  params:add_control("morph_speed", "morph speed",
+    controlspec.new(0.005, 0.1, "exp", 0.001, 0.02, ""))
+  params:set_action("morph_speed", function(v) morph.speed = v end)
+  params:add_trigger("morph_start", "start morph")
+  params:set_action("morph_start", function()
+    morph.position = 0
+    morph.active = true
+  end)
+
   params:add_separator("ARC")
 
   params:add_binary("arc_on", "arc engine", "toggle", 0)
@@ -2946,6 +3167,67 @@ function init()
   params:set_action("midi_out_ch_base", function(v)
     midi_all_notes_off()
     midi_out_ch_base = v
+  end)
+
+  -- TAPE
+  params:add_separator("TAPE")
+
+  params:add_binary("tape_on", "tape layer", "toggle", 0)
+  params:set_action("tape_on", function(v)
+    if v == 1 then
+      tape.on = true
+      tape_init()
+    else
+      tape.on = false
+      softcut.play(1, 0)
+      softcut.play(2, 0)
+      softcut.rec(1, 0)
+      audio.level_eng_cut(0)
+    end
+    screen_dirty = true
+  end)
+
+  params:add_control("tape_rate", "tape rate",
+    controlspec.new(-2, 2, "lin", 0.01, 1.0, ""))
+  params:set_action("tape_rate", function(v)
+    tape_set_rate(v)
+  end)
+
+  params:add_control("tape_level", "tape level",
+    controlspec.new(0, 1, "lin", 0.01, 0.3, ""))
+  params:set_action("tape_level", function(v)
+    tape_set_level(v)
+  end)
+
+  params:add_control("tape_feedback", "tape feedback",
+    controlspec.new(0, 0.95, "lin", 0.01, 0.5, ""))
+  params:set_action("tape_feedback", function(v)
+    tape.feedback = v
+    if tape.on then
+      softcut.pre_level(1, v)
+    end
+  end)
+
+  -- INPUT REACT
+  params:add_separator("INPUT")
+
+  params:add_binary("input_react_on", "input reactive", "toggle", 0)
+  params:set_action("input_react_on", function(v)
+    input_react.on = v == 1
+    if input_react.on then input_react_init() end
+    screen_dirty = true
+  end)
+
+  params:add_option("input_target", "input target",
+    {"density", "chaos", "aggression"}, 1)
+  params:set_action("input_target", function(v)
+    input_react.target = ({"density", "chaos", "aggression"})[v]
+  end)
+
+  params:add_control("input_sensitivity", "input sensitivity",
+    controlspec.new(0.1, 2.0, "lin", 0.01, 0.5, ""))
+  params:set_action("input_sensitivity", function(v)
+    input_react.sensitivity = v
   end)
 
   -- OP-XY MIDI
@@ -3009,6 +3291,15 @@ end
 function cleanup()
   midi_all_notes_off()
   opxy_all_notes_off()
+  -- Stop tape
+  if tape.on then
+    softcut.play(1, 0)
+    softcut.play(2, 0)
+    softcut.rec(1, 0)
+    audio.level_eng_cut(0)
+  end
+  -- Stop input poll
+  if input_poll then input_poll:stop() end
   if screen_metro then screen_metro:stop() end
   if grid_metro then grid_metro:stop() end
   if auto_lattice then auto_lattice:destroy() end
