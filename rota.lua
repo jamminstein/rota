@@ -357,6 +357,7 @@ local surge_direction = 1
 local surge_progress  = 0
 
 local key2_down_time = nil
+local playing = false
 
 -- Grid
 local g         = grid.connect()
@@ -543,6 +544,25 @@ local function gate_off(i)
   pcall(function() engine.amp(i - 1, 0.0) end)
   midi_note_off(i)
   opxy_note_off(i)
+end
+
+-- Play/stop control
+local function stop_all()
+  playing = false
+  for i = 1, NUM_VOICES do
+    gate_off(i)
+  end
+  midi_all_notes_off()
+  opxy_all_notes_off()
+  pcall(function() engine.all_off() end)
+end
+
+local function start_playing()
+  playing = true
+  -- Turn on initial voices
+  for i = 1, NUM_VOICES do
+    motors[i].on = (i <= 3) or (math.random() < 0.3)
+  end
 end
 
 -- Gate on — motor spins up
@@ -1004,6 +1024,7 @@ local function setup_lattice()
   auto_lattice:new_sprocket({
     action = function(t)
       local ok, err = pcall(function()
+        if not playing then screen_dirty = true; return end
         -- Speed accumulator
         rungler.step_acc = rungler.step_acc + rungler.speed
         if rungler.step_acc < 1.0 then
@@ -1436,7 +1457,7 @@ function key(n, z)
     if z == 1 then
       key2_down_time = util.time()
     else
-      -- KEY2 release: short = page action, long = cycle bandmate style
+      -- KEY2 release: short = play/stop, long = cycle bandmate style
       if key2_down_time then
         local dur = util.time() - key2_down_time
         if dur > 0.5 then
@@ -1444,39 +1465,11 @@ function key(n, z)
           bandmate_style = (bandmate_style % #BANDMATE_STYLES) + 1
           params:set("bandmate_style", bandmate_style, true)
         else
-          -- Short press: page-specific action
-          if current_page == 1 then
-            -- MOTORS: toggle bandmate on/off
-            bandmate_on = not bandmate_on
-            params:set("bandmate_on", bandmate_on and 2 or 1, true)
-            if bandmate_on then
-              for i = 1, NUM_VOICES do
-                motors[i].on = (i <= 3) or (math.random() < 0.3)
-              end
-            end
-          elseif current_page == 2 then
-            -- RUNGLER: toggle quantize
-            quantize = not quantize
-            params:set("quantize", quantize and 1 or 0, true)
-          elseif current_page == 3 then
-            -- SPACE: toggle fx send high/low (drench/dry)
-            local fxs = params:get("fx_send")
-            if fxs > 0.5 then
-              params:set("fx_send", 0.15, true)
-              pcall(function() engine.fx_send_all(0.15) end)
-            else
-              params:set("fx_send", 0.75, true)
-              pcall(function() engine.fx_send_all(0.75) end)
-            end
-          elseif current_page == 4 then
-            -- CHAOS: toggle bandmate on/off
-            bandmate_on = not bandmate_on
-            params:set("bandmate_on", bandmate_on and 2 or 1, true)
-            if bandmate_on then
-              for i = 1, NUM_VOICES do
-                motors[i].on = (i <= 3) or (math.random() < 0.3)
-              end
-            end
+          -- Short press: play/stop (all pages)
+          if playing then
+            stop_all()
+          else
+            start_playing()
           end
         end
         key2_down_time = nil
@@ -1492,17 +1485,16 @@ function key(n, z)
           motors[i].on = math.random() < density
           if not motors[i].on then gate_off(i) end
         end
-        -- Ensure at least 1
         if not motors[1].on then motors[1].on = true end
       elseif current_page == 2 then
-        -- RUNGLER: reseed (original K3 behavior)
+        -- RUNGLER: reseed
         rungler.reg = math.random(1, 255)
         rungler.value = 0
         for i = 1, NUM_VOICES do
           motors[i].pitch_offset = math.random(-4, 4)
         end
       elseif current_page == 3 then
-        -- SPACE: randomize timbre (waveshape + grind + drive)
+        -- SPACE: randomize timbre
         local ws = math.random() * 0.8 + 0.1
         local drv = math.random() * 0.5
         roughness = math.random() * 0.6
@@ -1512,16 +1504,19 @@ function key(n, z)
         pcall(function() engine.waveshape(ws) end)
         pcall(function() engine.drive(drv) end)
         update_globals()
-        -- Per-voice grind scatter
         for i = 1, NUM_VOICES do
           motors[i].grind = math.random() * 0.5
           pcall(function() engine.grind_v(i - 1, motors[i].grind) end)
         end
       elseif current_page == 4 then
-        -- CHAOS: cycle scale
-        scale_idx = (scale_idx % #SCALES) + 1
-        params:set("scale", scale_idx, true)
-        rebuild_scale()
+        -- CHAOS: toggle bandmate on/off
+        bandmate_on = not bandmate_on
+        params:set("bandmate_on", bandmate_on and 2 or 1, true)
+        if bandmate_on then
+          for i = 1, NUM_VOICES do
+            motors[i].on = (i <= 3) or (math.random() < 0.3)
+          end
+        end
       end
     end
   end
@@ -1539,6 +1534,20 @@ local function draw_header()
   screen.move(2, 7)
   screen.font_size(8)
   screen.text(PAGE_NAMES[current_page])
+
+  -- Play indicator
+  if playing then
+    screen.level(12)
+    screen.move(34, 3)
+    screen.line(34, 9)
+    screen.line(40, 6)
+    screen.close()
+    screen.fill()
+  else
+    screen.level(4)
+    screen.rect(34, 3, 6, 6)
+    screen.fill()
+  end
 
   -- Page dots
   for i = 1, NUM_PAGES do
@@ -1621,7 +1630,7 @@ local function draw_page_motors()
   screen.level(3)
   screen.move(2, 34)
   screen.font_size(7)
-  screen.text("K2 bandmate  K3 revoice")
+  screen.text("K2 " .. (playing and "stop" or "play") .. "  K3 revoice")
   screen.level(5)
   screen.move(110, 34)
   screen.text_right(SCALES[scale_idx])
@@ -1734,7 +1743,7 @@ local function draw_page_rungler()
   screen.level(3)
   screen.move(2, 63)
   screen.font_size(7)
-  screen.text("K2 qtz:" .. (quantize and "ON" or "OFF") .. "  K3 reseed")
+  screen.text("K2 " .. (playing and "stop" or "play") .. "  K3 reseed  qtz:" .. (quantize and "ON" or "OFF"))
   screen.level(5)
   screen.move(126, 63)
   screen.text_right("r:" .. string.format("%03d", rungler.reg))
@@ -1754,7 +1763,7 @@ local function draw_page_space()
   screen.move(2, 63)
   screen.font_size(7)
   local fxs = params:get("fx_send")
-  screen.text("K2 " .. (fxs > 0.5 and "drench" or "dry"))
+  screen.text("K2 " .. (playing and "stop" or "play"))
   screen.move(126, 63)
   screen.text_right("K3 rnd timbre")
 
@@ -1844,9 +1853,9 @@ local function draw_page_chaos()
   screen.level(3)
   screen.move(2, 63)
   screen.font_size(7)
-  screen.text("K2 bandmate")
+  screen.text("K2 " .. (playing and "stop" or "play"))
   screen.move(126, 63)
-  screen.text_right("K3 scale:" .. SCALES[scale_idx])
+  screen.text_right("K3 " .. (bandmate_on and "bm:ON" or "bm:OFF"))
 
   -- Large param displays (2x2 grid)
   draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 28)
@@ -2050,15 +2059,12 @@ function init()
   pcall(function() engine.rev_mix(0.35) end)
   pcall(function() engine.rev_time(3.0) end)
 
-  -- Start with bass + mid voices on (3 voices)
+  -- Start silent — K2 to play
+  playing = false
   for i = 1, NUM_VOICES do
-    motors[i].on = (i <= 3)
+    motors[i].on = false
     motors[i].amp = 0.0
     motors[i].gated = false
-  end
-
-  -- Send initial state to engine
-  for i = 1, NUM_VOICES do
     send_voice(i)
   end
 
