@@ -232,7 +232,7 @@ local function quantize_midi(midi_note)
 end
 
 local function midi_to_hz(n)
-  return musicutil.midi_to_hz(n)
+  return musicutil.note_num_to_freq(n)
 end
 
 -- -----------------------------------------------------------------------
