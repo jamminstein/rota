@@ -202,6 +202,149 @@ local octave_shift = 0
 local aggression = 0.0
 
 -- -----------------------------------------------------------------------
+-- ARC ENGINE: always-on progression intelligence
+-- Runs ON TOP of any bandmate style. Creates macro-level song form
+-- inspired by Anyma / melodic techno arrangement:
+--   INTRO → BUILD → DROP → BREAKDOWN → CLIMAX → EXHALE → repeat
+-- Each phase has a target intensity and duration in beats.
+-- Intensity modulates density, aggression, voice count, reverb.
+-- NOT random — it's a planned journey with deliberate curves.
+-- -----------------------------------------------------------------------
+
+local arc = {
+  on       = false,      -- arc engine enabled
+  phase    = 1,          -- current phase index
+  beat     = 0,          -- beats into current phase
+  dur      = 0,          -- duration of current phase in beats
+  intensity = 0.0,       -- current intensity 0..1 (the master curve)
+  target    = 0.0,       -- target intensity for this phase
+  curve     = "lin",     -- how we approach the target
+  journey   = 0,         -- which journey we're on (increments each cycle)
+}
+
+-- Phase definitions: name, target intensity, duration range (beats), curve type
+-- Durations are in bandmate ticks (7/4 beats each ≈ 1.75 beats)
+local ARC_PHASES = {
+  {name="INTRO",     target=0.15, dur={16,24}, curve="lin"},    -- sparse, establishing
+  {name="BUILD",     target=0.5,  dur={16,24}, curve="exp"},    -- gradual rise
+  {name="DROP",      target=0.85, dur={12,20}, curve="snap"},   -- sudden intensity
+  {name="SUSTAIN",   target=0.75, dur={16,28}, curve="hold"},   -- ride the energy
+  {name="BREAKDOWN", target=0.2,  dur={12,20}, curve="exp"},    -- strip back
+  {name="TENSION",   target=0.4,  dur={8,14},  curve="lin"},    -- rebuilding
+  {name="CLIMAX",    target=1.0,  dur={10,18}, curve="snap"},   -- maximum everything
+  {name="EXHALE",    target=0.1,  dur={12,20}, curve="exp"},    -- breathe out
+}
+
+local function arc_start_phase(idx)
+  arc.phase = ((idx - 1) % #ARC_PHASES) + 1
+  local ph = ARC_PHASES[arc.phase]
+  arc.beat = 0
+  arc.dur = ph.dur[1] + math.floor(math.random() * (ph.dur[2] - ph.dur[1]))
+  arc.target = ph.target
+  arc.curve = ph.curve
+
+  -- On new journey (wrapped around), change scale for freshness
+  if arc.phase == 1 then
+    arc.journey = arc.journey + 1
+    if math.random() < 0.6 then
+      scale_root = 24 + ({0, 2, 3, 5, 7, 8, 10})[math.random(7)]
+      params:set("root", scale_root, true)
+      rebuild_scale()
+    end
+    if math.random() < 0.4 then
+      scale_idx = ({2, 3, 4, 5})[math.random(4)]
+      params:set("scale", scale_idx, true)
+      rebuild_scale()
+    end
+  end
+
+  -- CLIMAX can shift octave up, BREAKDOWN back down
+  if arc.phase == 7 and math.random() < 0.5 then
+    octave_shift = util.clamp(octave_shift + 1, -2, 2)
+    params:set("octave_shift", octave_shift, true)
+  elseif arc.phase == 5 and octave_shift > 0 then
+    octave_shift = octave_shift - 1
+    params:set("octave_shift", octave_shift, true)
+  end
+end
+
+-- Called every bandmate tick. Advances the intensity curve.
+local function arc_tick()
+  if not arc.on then return end
+
+  arc.beat = arc.beat + 1
+
+  -- Progress through current phase (0..1)
+  local progress = math.min(arc.beat / arc.dur, 1.0)
+
+  -- Calculate intensity based on curve type
+  local prev = arc.intensity
+  if arc.curve == "lin" then
+    arc.intensity = prev + (arc.target - prev) * 0.06
+  elseif arc.curve == "exp" then
+    -- Exponential ease: slow start, fast end (or reverse for drops)
+    local ease = progress * progress
+    arc.intensity = prev + (arc.target - prev) * ease * 0.12
+  elseif arc.curve == "snap" then
+    -- Quick snap to target in first 20% of phase
+    if progress < 0.2 then
+      arc.intensity = prev + (arc.target - prev) * 0.3
+    else
+      arc.intensity = prev + (arc.target - prev) * 0.02
+    end
+  elseif arc.curve == "hold" then
+    -- Hold near target with small breathing
+    arc.intensity = arc.target + math.sin(arc.beat * 0.3) * 0.05
+  end
+
+  arc.intensity = util.clamp(arc.intensity, 0.0, 1.0)
+
+  -- APPLY intensity to performance parameters (additive, not override)
+  -- These are gentle nudges that work WITH the bandmate style
+
+  -- Density: intensity pushes density up
+  local arc_density = 0.2 + arc.intensity * 0.7
+  density = density * 0.7 + arc_density * 0.3  -- blend
+  density = util.clamp(density, 0.05, 1.0)
+
+  -- Aggression: intensity directly maps
+  local arc_aggro = arc.intensity * 0.8
+  aggression = aggression * 0.6 + arc_aggro * 0.4  -- blend
+  aggression = util.clamp(aggression, 0.0, 1.0)
+
+  -- Voice count: more voices at higher intensity
+  local target_voices = math.floor(2 + arc.intensity * 6)
+  local current_voices = 0
+  for i = 1, NUM_VOICES do if motors[i].on then current_voices = current_voices + 1 end end
+  if current_voices < target_voices then
+    -- Turn on a random voice
+    for i = 1, NUM_VOICES do
+      if not motors[i].on then motors[i].on = true; break end
+    end
+  elseif current_voices > target_voices + 1 then
+    -- Turn off a random high voice (keep bass)
+    for i = NUM_VOICES, 3, -1 do
+      if motors[i].on then motors[i].on = false; gate_off(i); break end
+    end
+  end
+
+  -- Reverb: inversely related to intensity (dry at peak, wet at breakdown)
+  local arc_rev = 0.6 - arc.intensity * 0.4
+  local cur_rev = params:get("rev_mix")
+  local new_rev = cur_rev * 0.8 + arc_rev * 0.2
+  params:set("rev_mix", new_rev, true)
+  pcall(function() engine.rev_mix(new_rev) end)
+
+  -- Advance to next phase?
+  if arc.beat >= arc.dur then
+    arc_start_phase(arc.phase + 1)
+  end
+
+  params:set("density", density, true)
+  params:set("aggression", aggression, true)
+end
+
+-- -----------------------------------------------------------------------
 -- GATE PATTERN / RHYTHM SYSTEM
 -- -----------------------------------------------------------------------
 
@@ -1509,6 +1652,8 @@ local function setup_lattice()
           bandmate_evolve_tempo()
           bandmate_evolve_conductor()
         end
+        -- Arc engine runs independently of bandmate
+        arc_tick()
       end)
     end,
     division = 7 / 4,
@@ -1902,21 +2047,23 @@ function key(n, z)
           pcall(function() engine.grind_v(i - 1, motors[i].grind) end)
         end
       elseif current_page == 4 then
-        -- CHAOS: cycle octave shift (-2 to +2, then toggles bandmate)
-        if octave_shift < 2 then
-          octave_shift = octave_shift + 1
-        else
-          octave_shift = -2
-          -- Also toggle bandmate when wrapping
-          bandmate_on = not bandmate_on
-          params:set("bandmate_on", bandmate_on and 2 or 1, true)
-          if bandmate_on then
-            for i = 1, NUM_VOICES do
-              motors[i].on = (i <= 3) or (math.random() < 0.3)
-            end
+        -- CHAOS: cycle through: bandmate toggle → arc toggle → octave shift
+        if not bandmate_on then
+          bandmate_on = true
+          params:set("bandmate_on", 2, true)
+          for i = 1, NUM_VOICES do
+            motors[i].on = (i <= 3) or (math.random() < 0.3)
           end
+        elseif not arc.on then
+          arc.on = true
+          params:set("arc_on", 2, true)
+          arc_start_phase(1)
+        else
+          -- Both on: cycle octave
+          octave_shift = octave_shift + 1
+          if octave_shift > 2 then octave_shift = -2 end
+          params:set("octave_shift", octave_shift, true)
         end
-        params:set("octave_shift", octave_shift, true)
       elseif current_page == 5 then
         -- RHYTHM: K3 action depends on gate mode
         if gate_mode == 1 then
@@ -2005,10 +2152,26 @@ local function draw_header()
     screen.fill()
   end
 
+  -- Arc phase indicator (below header, before divider)
+  if arc.on then
+    local ph = ARC_PHASES[arc.phase]
+    screen.level(6)
+    screen.move(44, 7)
+    screen.font_size(7)
+    screen.text(ph.name)
+    -- Intensity meter: tiny bar
+    screen.level(2)
+    screen.rect(44, 8, 30, 2)
+    screen.fill()
+    screen.level(math.floor(arc.intensity * 12) + 3)
+    screen.rect(44, 8, math.floor(arc.intensity * 30), 2)
+    screen.fill()
+  end
+
   -- Divider line
   screen.level(2)
-  screen.move(0, 10)
-  screen.line(128, 10)
+  screen.move(0, 11)
+  screen.line(128, 11)
   screen.stroke()
 end
 
@@ -2338,7 +2501,11 @@ local function draw_page_chaos()
   screen.font_size(7)
   screen.text("K2 " .. (playing and "stop" or "play"))
   screen.move(126, 63)
-  screen.text_right("K3 oct/bm:" .. (bandmate_on and "ON" or "OFF"))
+  local k3hint = "K3 "
+  if not bandmate_on then k3hint = k3hint .. "bm:ON"
+  elseif not arc.on then k3hint = k3hint .. "arc:ON"
+  else k3hint = k3hint .. "oct" end
+  screen.text_right(k3hint)
 
   -- Large param displays (2x3 grid)
   draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 27)
@@ -2580,6 +2747,16 @@ function init()
   end)
 
   -- BANDMATE
+  -- ARC ENGINE
+  params:add_separator("ARC")
+
+  params:add_binary("arc_on", "arc engine", "toggle", 0)
+  params:set_action("arc_on", function(v)
+    arc.on = v == 1
+    if arc.on then arc_start_phase(1) end
+    screen_dirty = true
+  end)
+
   params:add_separator("BANDMATE")
 
   local style_names = {}
