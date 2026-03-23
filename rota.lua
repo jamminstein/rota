@@ -100,6 +100,23 @@ local density = 0.7  -- 0=silence, 1=full density
 -- BANDMATE SYSTEM
 -- -----------------------------------------------------------------------
 
+-- Stereo field state (used by STEREO bandmate style)
+local stereo = {
+  phase = 1,          -- current stereo phase (1-5)
+  phase_timer = 0,    -- counts up, resets on phase change
+  phase_dur = 0,      -- how long this phase lasts
+  pans = {},          -- current pan position per voice
+}
+for i = 1, 8 do stereo.pans[i] = ((i - 1) / 7.0) * 2 - 1 end  -- default spread
+
+local STEREO_PHASES = {
+  {name="SPLIT",     dur_lo=12, dur_hi=25},  -- hard L/R with different notes
+  {name="ARPEGGIO",  dur_lo=8,  dur_hi=16},  -- alternating L/R bouncing
+  {name="CONVERGE",  dur_lo=10, dur_hi=20},  -- pull everything to center
+  {name="DIALOGUE",  dur_lo=10, dur_hi=18},  -- call/response L then R
+  {name="SWIRL",     dur_lo=15, dur_hi=30},  -- slow rotation
+}
+
 local BANDMATE_STYLES = {
   {
     name = "DRIFT",
@@ -184,6 +201,20 @@ local BANDMATE_STYLES = {
     reseed_prob       = 0.1,
     topology_mutate_prob = 0.08,
     voice_toggle_prob = 0.1,
+  },
+  {
+    name = "STEREO",
+    chaos_lo = 0.2,  chaos_hi = 0.6,
+    mass_lo  = 0.2,  mass_hi  = 0.8,
+    rough_lo = 0.05, rough_hi = 0.4,
+    density_lo = 0.5, density_hi = 0.85,
+    evolution_speed   = 0.05,
+    scale_change_prob = 0.03,
+    reverb_mix_target = 0.5,
+    reverb_time_target = 5.0,
+    reseed_prob       = 0.02,
+    topology_mutate_prob = 0.03,
+    voice_toggle_prob = 0.04,
   },
 }
 
@@ -538,6 +569,137 @@ local function bandmate_maybe_reseed()
   end
 end
 
+-- STEREO phase evolution: cycles through 5 spatial phases
+local function stereo_new_phase()
+  stereo.phase = (stereo.phase % #STEREO_PHASES) + 1
+  local sp = STEREO_PHASES[stereo.phase]
+  stereo.phase_dur = sp.dur_lo + math.random() * (sp.dur_hi - sp.dur_lo)
+  stereo.phase_timer = 0
+end
+
+local function bandmate_evolve_stereo()
+  if bandmate_style ~= 7 then return end  -- only for STEREO style
+
+  stereo.phase_timer = stereo.phase_timer + 1
+  if stereo.phase_timer >= stereo.phase_dur then
+    stereo_new_phase()
+  end
+
+  local sp = STEREO_PHASES[stereo.phase]
+  local t = stereo.phase_timer / stereo.phase_dur  -- 0..1 progress
+
+  if sp.name == "SPLIT" then
+    -- Hard pan: odd voices left, even voices right
+    -- Different pitch offsets per side for contrasting notes
+    for i = 1, NUM_VOICES do
+      if i % 2 == 1 then
+        stereo.pans[i] = -0.85
+        -- Left side gets one set of offsets
+        if motors[i].on and math.random() < 0.06 then
+          motors[i].pitch_offset = ({0, 3, 7})[math.random(3)]
+        end
+      else
+        stereo.pans[i] = 0.85
+        -- Right side gets contrasting offsets
+        if motors[i].on and math.random() < 0.06 then
+          motors[i].pitch_offset = ({-5, 2, 5})[math.random(3)]
+        end
+      end
+      pcall(function() engine.pan(i - 1, stereo.pans[i]) end)
+    end
+
+  elseif sp.name == "ARPEGGIO" then
+    -- Rapid L/R bouncing: each voice alternates side on each step
+    for i = 1, NUM_VOICES do
+      local bounce = math.sin((bandmate_phase * 3.0) + i * math.pi / 4)
+      stereo.pans[i] = bounce * 0.9
+      pcall(function() engine.pan(i - 1, stereo.pans[i]) end)
+    end
+    -- Contrasting pitch intervals between neighbors
+    if math.random() < 0.08 then
+      local v = math.random(1, NUM_VOICES)
+      motors[v].pitch_offset = ({-7, -5, 0, 5, 7, 12})[math.random(6)]
+    end
+
+  elseif sp.name == "CONVERGE" then
+    -- Slowly pull all voices to center, similar notes (unison feel)
+    for i = 1, NUM_VOICES do
+      stereo.pans[i] = stereo.pans[i] * (1 - t * 0.08)  -- drift toward 0
+      pcall(function() engine.pan(i - 1, stereo.pans[i]) end)
+    end
+    -- Bring pitch offsets closer together
+    if math.random() < 0.04 then
+      local target_offset = motors[1].pitch_offset
+      for i = 2, NUM_VOICES do
+        motors[i].pitch_offset = motors[i].pitch_offset +
+          (target_offset - motors[i].pitch_offset) * 0.3
+        motors[i].pitch_offset = math.floor(motors[i].pitch_offset + 0.5)
+      end
+    end
+
+  elseif sp.name == "DIALOGUE" then
+    -- Call and response: left side plays, then right side answers
+    local left_turn = (math.floor(bandmate_phase * 2) % 2) == 0
+    for i = 1, NUM_VOICES do
+      if i % 2 == 1 then
+        stereo.pans[i] = -0.8
+        -- Modulate density: active on left turn, quiet on right turn
+        if left_turn then
+          if not motors[i].on and math.random() < 0.15 then motors[i].on = true end
+        else
+          if motors[i].on and math.random() < 0.1 then
+            motors[i].on = false
+            gate_off(i)
+          end
+        end
+      else
+        stereo.pans[i] = 0.8
+        if not left_turn then
+          if not motors[i].on and math.random() < 0.15 then motors[i].on = true end
+        else
+          if motors[i].on and math.random() < 0.1 then
+            motors[i].on = false
+            gate_off(i)
+          end
+        end
+      end
+      pcall(function() engine.pan(i - 1, stereo.pans[i]) end)
+    end
+    -- Answering side gets transposed intervals
+    if math.random() < 0.06 then
+      local intervals = {3, 4, 5, 7}
+      local int = intervals[math.random(#intervals)]
+      local side_start = left_turn and 2 or 1
+      for i = side_start, NUM_VOICES, 2 do
+        motors[i].pitch_offset = int
+      end
+    end
+
+  elseif sp.name == "SWIRL" then
+    -- Slow rotation: each voice orbits at its own speed
+    for i = 1, NUM_VOICES do
+      local rate = 0.15 + (i - 1) * 0.07  -- different speeds per voice
+      stereo.pans[i] = math.sin(bandmate_phase * rate + i * 0.8) * 0.9
+      pcall(function() engine.pan(i - 1, stereo.pans[i]) end)
+    end
+    -- Occasional timbre contrast: vary waveshape per side
+    if math.random() < 0.03 then
+      for i = 1, NUM_VOICES do
+        local ws = 0.3 + stereo.pans[i] * 0.2  -- L=darker, R=brighter
+        pcall(function() engine.grind_v(i - 1, math.abs(ws) * 0.5) end)
+      end
+    end
+  end
+
+  -- Ensure at least 2 voices on
+  local count = 0
+  for i = 1, NUM_VOICES do if motors[i].on then count = count + 1 end end
+  if count < 2 then
+    local picks = {1, math.random(3, 6)}
+    for _, v in ipairs(picks) do motors[v].on = true end
+  end
+end
+
 local function bandmate_evolve_reverb()
   local s = get_style()
   local cur_mix = params:get("rev_mix")
@@ -654,6 +816,7 @@ local function setup_lattice()
           bandmate_pick_voices()
           bandmate_mutate_topology()
           bandmate_maybe_reseed()
+          bandmate_evolve_stereo()
         end
       end)
     end,
@@ -996,10 +1159,15 @@ local function draw_header()
 
   -- Bandmate status right
   if bandmate_on then
+    local sname = BANDMATE_STYLES[bandmate_style].name
+    -- Show stereo phase when in STEREO mode
+    if bandmate_style == 7 and stereo.phase then
+      sname = sname .. ":" .. STEREO_PHASES[stereo.phase].name
+    end
     screen.level(10)
     screen.move(126, 7)
     screen.font_size(8)
-    screen.text_right(BANDMATE_STYLES[bandmate_style].name)
+    screen.text_right(sname)
     local pulse = math.floor((math.sin(frame * 0.25) * 0.5 + 0.5) * 12) + 3
     screen.level(pulse)
     screen.circle(78, 4, 1.5)
@@ -1406,7 +1574,16 @@ function init()
 
   params:add_option("bandmate_style", "bandmate style", style_names, 1)
   params:set_action("bandmate_style", function(v)
-    bandmate_style = v; screen_dirty = true
+    bandmate_style = v
+    if v == 7 then stereo_new_phase() end  -- init stereo phases
+    -- Reset pans to default spread when leaving STEREO
+    if v ~= 7 then
+      for i = 1, NUM_VOICES do
+        stereo.pans[i] = ((i - 1) / 7.0) * 2 - 1
+        pcall(function() engine.pan(i - 1, stereo.pans[i] * 0.7) end)
+      end
+    end
+    screen_dirty = true
   end)
 
   params:add_binary("bandmate_on", "bandmate", "toggle", 0)

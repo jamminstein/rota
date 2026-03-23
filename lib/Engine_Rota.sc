@@ -248,6 +248,11 @@ Engine_Rota : CroneEngine {
       synths[msg[1].clip(0,7)].set(\ampLag, msg[2]);
     });
 
+    // Per-voice pan (-1 left, 0 center, +1 right)
+    this.addCommand("pan", "if", { |msg|
+      synths[msg[1].clip(0,7)].set(\pan, msg[2]);
+    });
+
     // All voices off
     this.addCommand("all_off", "", { |msg|
       synths.do { |s| s.set(\amp, 0.0) };
