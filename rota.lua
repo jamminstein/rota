@@ -32,6 +32,104 @@ local midi_active_notes = {}
 for i = 1, 8 do midi_active_notes[i] = nil end
 
 -- -----------------------------------------------------------------------
+-- OP-XY MIDI OUT
+-- Sends notes + CCs to OP-XY. Maps ROTA's parameters to OP-XY CCs:
+--   CC 74 = filter cutoff (mapped from chaos)
+--   CC 11 = expression (mapped from density)
+--   CC 91 = reverb send (mapped from rev_mix)
+--   CC 1  = mod wheel (mapped from waveshape)
+--   CC 71 = resonance (mapped from roughness)
+-- Per-voice notes on separate channels for polyphonic motor control.
+-- -----------------------------------------------------------------------
+
+local opxy_out = nil
+local opxy_channel = 1
+local opxy_enabled = false
+local opxy_active_notes = {}
+for i = 1, 8 do opxy_active_notes[i] = nil end
+
+-- CC state with slew to avoid jitter
+local CC_SLEW = 0.15
+local CC_THRESH = 2
+local opxy_cc_cur = {filter=64, expr=64, reverb=32, mod=64, reso=32}
+local opxy_cc_tgt = {filter=64, expr=64, reverb=32, mod=64, reso=32}
+
+local function opxy_cc(cc_num, val)
+  if opxy_out and opxy_enabled then
+    pcall(function()
+      opxy_out:cc(cc_num, math.floor(util.clamp(val, 0, 127)), opxy_channel)
+    end)
+  end
+end
+
+local function opxy_note_on(voice, note, vel)
+  if not opxy_out or not opxy_enabled then return end
+  local ch = opxy_channel + voice - 1
+  if ch > 16 then ch = opxy_channel end
+  -- Note-off previous
+  if opxy_active_notes[voice] then
+    pcall(function()
+      opxy_out:note_off(opxy_active_notes[voice].note, 0, opxy_active_notes[voice].ch)
+    end)
+  end
+  pcall(function()
+    opxy_out:note_on(note, vel, ch)
+  end)
+  opxy_active_notes[voice] = {note = note, ch = ch}
+end
+
+local function opxy_note_off(voice)
+  if not opxy_out or not opxy_enabled then return end
+  if opxy_active_notes[voice] then
+    pcall(function()
+      opxy_out:note_off(opxy_active_notes[voice].note, 0, opxy_active_notes[voice].ch)
+    end)
+    opxy_active_notes[voice] = nil
+  end
+end
+
+local function opxy_all_notes_off()
+  if not opxy_out or not opxy_enabled then return end
+  for i = 1, NUM_VOICES do opxy_note_off(i) end
+  -- All notes off CC on all used channels
+  for ch = opxy_channel, math.min(opxy_channel + 7, 16) do
+    pcall(function() opxy_out:cc(123, 0, ch) end)
+  end
+end
+
+-- Compute CC targets from current ROTA state, then slew toward them
+local function opxy_update_ccs()
+  if not opxy_out or not opxy_enabled then return end
+
+  -- Map ROTA params to OP-XY CCs
+  opxy_cc_tgt.filter = math.floor(util.linlin(0, 1, 20, 120, chaos))
+  opxy_cc_tgt.expr   = math.floor(util.linlin(0, 1, 30, 120, density))
+  opxy_cc_tgt.reverb = math.floor(util.linlin(0, 1, 0, 100, params:get("rev_mix")))
+  opxy_cc_tgt.mod    = math.floor(util.linlin(0, 1, 0, 127, params:get("waveshape")))
+  opxy_cc_tgt.reso   = math.floor(util.linlin(0, 1, 0, 100, roughness))
+
+  -- Slew toward targets
+  local cc_map = {
+    {key="filter", cc=74},
+    {key="expr",   cc=11},
+    {key="reverb", cc=91},
+    {key="mod",    cc=1},
+    {key="reso",   cc=71},
+  }
+  for _, m in ipairs(cc_map) do
+    local cur = opxy_cc_cur[m.key]
+    local tgt = opxy_cc_tgt[m.key]
+    local nxt = math.floor(cur + (tgt - cur) * CC_SLEW)
+    if math.abs(tgt - nxt) < CC_THRESH then nxt = tgt end
+    nxt = util.clamp(nxt, 0, 127)
+    if math.abs(nxt - cur) >= CC_THRESH then
+      opxy_cc_cur[m.key] = nxt
+      opxy_cc(m.cc, nxt)
+    end
+  end
+end
+
+-- -----------------------------------------------------------------------
 -- STATE
 -- -----------------------------------------------------------------------
 
@@ -444,6 +542,7 @@ local function gate_off(i)
   pcall(function() engine.amp_lag(i - 1, 0.3) end)  -- slow spin-down
   pcall(function() engine.amp(i - 1, 0.0) end)
   midi_note_off(i)
+  opxy_note_off(i)
 end
 
 -- Gate on — motor spins up
@@ -964,9 +1063,10 @@ local function setup_lattice()
               engine.freq(i - 1, hz)
               engine.amp(i - 1, m.amp)
 
-              -- MIDI out
+              -- MIDI out + OP-XY
               local midi_vel = math.floor(util.clamp(m.amp * 320, 1, 127))
               midi_note_on(i, midi_note, midi_vel)
+              opxy_note_on(i, midi_note, midi_vel)
 
               m.active_bright = 12
             end
@@ -977,6 +1077,9 @@ local function setup_lattice()
             m.active_bright = m.active_bright - 1
           end
         end
+
+        -- Update OP-XY CCs every step (smooth slew)
+        opxy_update_ccs()
 
         screen_dirty = true
       end)
@@ -1013,6 +1116,7 @@ local function setup_lattice()
           bandmate_update_inertia()
           bandmate_evolve_params()
           bandmate_evolve_timbre()
+          opxy_update_ccs()
         end
       end)
     end,
@@ -1878,6 +1982,27 @@ function init()
     midi_out_ch_base = v
   end)
 
+  -- OP-XY MIDI
+  params:add_separator("OP-XY MIDI")
+
+  params:add_binary("opxy_enabled", "OP-XY enabled", "toggle", 0)
+  params:set_action("opxy_enabled", function(v)
+    opxy_enabled = v == 1
+    if not opxy_enabled then opxy_all_notes_off() end
+  end)
+
+  params:add_number("opxy_device", "OP-XY device", 1, 16, 2)
+  params:set_action("opxy_device", function(v)
+    opxy_all_notes_off()
+    opxy_out = midi.connect(v)
+  end)
+
+  params:add_number("opxy_channel", "OP-XY channel", 1, 16, 1)
+  params:set_action("opxy_channel", function(v)
+    opxy_all_notes_off()
+    opxy_channel = v
+  end)
+
   params:bang()
 
   -- Grid
@@ -1920,6 +2045,7 @@ end
 
 function cleanup()
   midi_all_notes_off()
+  opxy_all_notes_off()
   if screen_metro then screen_metro:stop() end
   if grid_metro then grid_metro:stop() end
   if auto_lattice then auto_lattice:destroy() end
