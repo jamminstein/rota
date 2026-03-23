@@ -204,6 +204,9 @@ local held_grid = {}
 -- Screen
 local screen_dirty = true
 local frame        = 0
+local current_page = 1
+local NUM_PAGES    = 4
+local PAGE_NAMES   = {"MOTORS", "RUNGLER", "SPACE", "CHAOS"}
 
 -- Global params
 local chaos     = 0.4
@@ -873,21 +876,69 @@ end
 
 function enc(n, d)
   if n == 1 then
-    chaos = util.clamp(chaos + d * 0.02, 0.0, 1.0)
-    rungler.feedback = chaos
-    params:set("chaos", chaos, true)
-    update_globals()
-  elseif n == 2 then
-    mass = util.clamp(mass + d * 0.02, 0.0, 1.5)
-    params:set("mass", mass, true)
-    for i = 1, NUM_VOICES do
-      motors[i].inertia = mass * (0.4 + i * 0.1)
-      pcall(function() engine.inertia(i - 1, motors[i].inertia) end)
+    -- E1: page navigation
+    current_page = util.clamp(current_page + d, 1, NUM_PAGES)
+
+  elseif current_page == 1 then
+    -- MOTORS: E2=density, E3=rungler speed
+    if n == 2 then
+      density = util.clamp(density + d * 0.02, 0.0, 1.0)
+      params:set("density", density, true)
+    elseif n == 3 then
+      rungler.speed = util.clamp(rungler.speed * (1 + d * 0.05), 0.125, 8.0)
+      params:set("rungler_speed", rungler.speed, true)
     end
-  elseif n == 3 then
-    roughness = util.clamp(roughness + d * 0.02, 0.0, 1.0)
-    params:set("roughness", roughness, true)
-    update_globals()
+
+  elseif current_page == 2 then
+    -- RUNGLER: E2=chaos, E3=rungler speed
+    if n == 2 then
+      chaos = util.clamp(chaos + d * 0.02, 0.0, 1.0)
+      rungler.feedback = chaos
+      params:set("chaos", chaos, true)
+      update_globals()
+    elseif n == 3 then
+      rungler.speed = util.clamp(rungler.speed * (1 + d * 0.05), 0.125, 8.0)
+      params:set("rungler_speed", rungler.speed, true)
+    end
+
+  elseif current_page == 3 then
+    -- SPACE: E2=reverb (mix+size+time), E3=distortion (drive+waveshape+grind)
+    if n == 2 then
+      local rm = util.clamp(params:get("rev_mix") + d * 0.02, 0, 1)
+      local rt = util.clamp(params:get("rev_time") + d * 0.2, 0.5, 12)
+      local rs = util.clamp(params:get("rev_size") + d * 0.1, 0.5, 5)
+      params:set("rev_mix", rm, true)
+      params:set("rev_time", rt, true)
+      params:set("rev_size", rs, true)
+      pcall(function() engine.rev_mix(rm) end)
+      pcall(function() engine.rev_time(rt) end)
+      pcall(function() engine.rev_size(rs) end)
+    elseif n == 3 then
+      -- Distortion macro: drive + waveshape + grind move together
+      local drv = util.clamp(params:get("drive") + d * 0.02, 0, 1)
+      local ws = util.clamp(params:get("waveshape") + d * 0.015, 0, 1)
+      roughness = util.clamp(roughness + d * 0.015, 0, 1)
+      params:set("drive", drv, true)
+      params:set("waveshape", ws, true)
+      params:set("roughness", roughness, true)
+      update_globals()
+    end
+
+  elseif current_page == 4 then
+    -- CHAOS: E2=chaos, E3=mass
+    if n == 2 then
+      chaos = util.clamp(chaos + d * 0.02, 0.0, 1.0)
+      rungler.feedback = chaos
+      params:set("chaos", chaos, true)
+      update_globals()
+    elseif n == 3 then
+      mass = util.clamp(mass + d * 0.02, 0.0, 1.5)
+      params:set("mass", mass, true)
+      for i = 1, NUM_VOICES do
+        motors[i].inertia = mass * (0.4 + i * 0.1)
+        pcall(function() engine.inertia(i - 1, motors[i].inertia) end)
+      end
+    end
   end
   screen_dirty = true
 end
@@ -925,42 +976,128 @@ function key(n, z)
 end
 
 -- -----------------------------------------------------------------------
--- SCREEN
+-- SCREEN — 4 pages, navigate with E1
 -- -----------------------------------------------------------------------
 
-local function draw_motor_bars()
-  local bar_w = 11
-  local bar_h = 18
+-- Shared: draw header bar on all pages
+local function draw_header()
+  -- Page name left
+  screen.level(15)
+  screen.move(2, 7)
+  screen.font_size(8)
+  screen.text(PAGE_NAMES[current_page])
+
+  -- Page dots
+  for i = 1, NUM_PAGES do
+    screen.level(i == current_page and 15 or 3)
+    screen.rect(52 + (i - 1) * 6, 3, 3, 3)
+    screen.fill()
+  end
+
+  -- Bandmate status right
+  if bandmate_on then
+    screen.level(10)
+    screen.move(126, 7)
+    screen.font_size(8)
+    screen.text_right(BANDMATE_STYLES[bandmate_style].name)
+    local pulse = math.floor((math.sin(frame * 0.25) * 0.5 + 0.5) * 12) + 3
+    screen.level(pulse)
+    screen.circle(78, 4, 1.5)
+    screen.fill()
+  end
+
+  -- Divider line
+  screen.level(2)
+  screen.move(0, 10)
+  screen.line(128, 10)
+  screen.stroke()
+end
+
+-- Shared: horizontal param bar
+local function draw_bar(label, value, x, y, w, h)
+  h = h or 4
+  screen.level(6)
+  screen.move(x, y + 1)
+  screen.font_size(8)
+  screen.text(label)
+  local bx = x + screen.text_extents(label) + 3
+  screen.level(2)
+  screen.rect(bx, y - 3, w, h)
+  screen.fill()
+  screen.level(12)
+  screen.rect(bx, y - 3, math.floor(util.clamp(value, 0, 1) * w), h)
+  screen.fill()
+end
+
+-- Shared: large param display
+local function draw_big_param(label, value, fmt, x, y)
+  screen.level(5)
+  screen.move(x, y)
+  screen.font_size(8)
+  screen.text(label)
+  screen.level(15)
+  screen.move(x, y + 12)
+  screen.font_size(12)
+  screen.text(string.format(fmt, value))
+end
+
+-- PAGE 1: MOTORS — the 8 motor bars, performance view
+local function draw_page_motors()
+  -- E2=density  E3=speed
+  screen.level(4)
+  screen.move(2, 18)
+  screen.font_size(8)
+  screen.text("E2 density")
+  screen.move(68, 18)
+  screen.text("E3 speed")
+
+  -- Density + speed values
+  screen.level(12)
+  screen.move(2, 27)
+  screen.font_size(8)
+  screen.text(string.format("%.0f%%", density * 100))
+  screen.move(68, 27)
+  screen.text(string.format("%.2fx", rungler.speed))
+
+  -- Scale name
+  screen.level(5)
+  screen.move(110, 27)
+  screen.font_size(7)
+  screen.text_right(SCALES[scale_idx])
+
+  -- Motor bars across bottom
+  local bar_w = 13
+  local bar_h = 28
   local y_base = 63
   local x_start = 2
-  local gap = 2
+  local gap = 1
 
   for i = 1, NUM_VOICES do
     local x = x_start + (i - 1) * (bar_w + gap)
     local m = motors[i]
-
-    -- Role indicator: thin line at top shows voice type
     local role = VOICE_ROLES[i]
+
+    -- Role marker above bar
     if role.name == "bass" then
-      screen.level(m.on and 6 or 2)
+      screen.level(m.on and 8 or 2)
       screen.rect(x, y_base - bar_h - 2, bar_w, 1)
       screen.fill()
     elseif role.name == "high" then
-      screen.level(m.on and 4 or 1)
-      screen.pixel(x + 2, y_base - bar_h - 2)
-      screen.pixel(x + 5, y_base - bar_h - 2)
-      screen.pixel(x + 8, y_base - bar_h - 2)
+      screen.level(m.on and 5 or 2)
+      screen.pixel(x + 3, y_base - bar_h - 2)
+      screen.pixel(x + 6, y_base - bar_h - 2)
+      screen.pixel(x + 9, y_base - bar_h - 2)
       screen.fill()
     end
 
-    -- Border: brighter when gated
-    screen.level(m.gated and 10 or (m.on and 4 or 1))
+    -- Border: flashes on gate
+    screen.level(m.gated and 12 or (m.on and 4 or 1))
     screen.rect(x, y_base - bar_h, bar_w, bar_h)
     screen.stroke()
 
     -- Fill: amplitude
-    local level = (m.on and m.gated) and m.amp or 0
-    local h = math.floor(level / 0.45 * bar_h)
+    local amp = (m.on and m.gated) and m.amp or 0
+    local h = math.floor(amp / 0.45 * bar_h)
     if h > 0 then
       screen.level(m.gated and 15 or 3)
       screen.rect(x + 1, y_base - h, bar_w - 2, h)
@@ -969,50 +1106,181 @@ local function draw_motor_bars()
 
     -- Frequency dot
     if m.on and m.target_freq and m.target_freq > 0 then
-      local note_norm = util.clamp((m.target_freq - 24) / 60, 0, 1)
-      local dot_y = y_base - 2 - math.floor(note_norm * (bar_h - 4))
+      local nn = util.clamp((m.target_freq - 24) / 60, 0, 1)
+      local dy = y_base - 2 - math.floor(nn * (bar_h - 4))
       screen.level(m.gated and 15 or 6)
-      screen.rect(x + math.floor(bar_w/2) - 1, dot_y, 3, 1)
+      screen.rect(x + math.floor(bar_w / 2) - 1, dy, 3, 1)
       screen.fill()
     end
   end
 end
 
-local function draw_rungler_arc()
-  local cx = 108
-  local cy = 20
-  local r = 8 + math.floor(chaos * 6)
+-- PAGE 2: RUNGLER — big visualization
+local function draw_page_rungler()
+  -- E2=chaos  E3=speed
+  screen.level(4)
+  screen.move(2, 18)
+  screen.font_size(8)
+  screen.text("E2 chaos")
+  screen.move(68, 18)
+  screen.text("E3 speed")
+
+  -- Large rungler circle (centered)
+  local cx = 64
+  local cy = 42
+  local r = 14 + math.floor(chaos * 8)
+
   screen.level(3)
   screen.circle(cx, cy, r)
   screen.stroke()
 
+  -- 8 bits around the circle
   for bit = 0, 7 do
     local angle = (bit / 8.0) * 2 * math.pi - (math.pi / 2)
     local bval = (rungler.reg >> bit) & 1
     local bx = cx + math.cos(angle) * r
     local by = cy + math.sin(angle) * r
+
+    -- Bit dots: bright when 1
     screen.level(bval == 1 and 15 or 2)
-    screen.circle(bx, by, 1.5)
+    screen.circle(bx, by, 2.5)
     screen.fill()
+
+    -- Topology markers: ring around bits that feed the rungler
+    if topology[bit + 1] then
+      screen.level(6)
+      screen.circle(bx, by, 4)
+      screen.stroke()
+    end
   end
 
-  -- Center: rungler value
-  screen.level(math.floor(rungler.value * 12) + 2)
-  screen.circle(cx, cy, 2.5)
+  -- Center: rungler value glow
+  local cv = math.floor(rungler.value * 13) + 2
+  screen.level(cv)
+  screen.circle(cx, cy, 4)
   screen.fill()
+
+  -- Chaos value left
+  screen.level(12)
+  screen.move(2, 28)
+  screen.font_size(10)
+  screen.text(string.format("%.0f%%", chaos * 100))
+
+  -- Speed value right
+  screen.move(126, 28)
+  screen.text_right(string.format("%.2fx", rungler.speed))
+
+  -- Register value bottom
+  screen.level(5)
+  screen.move(2, 63)
+  screen.font_size(7)
+  screen.text("reg:" .. string.format("%03d", rungler.reg))
+
+  -- Step count
+  screen.move(126, 63)
+  screen.text_right("step:" .. rungler.step_count)
 end
 
-local function draw_param_bar(label, value, x, y, w)
-  screen.level(6)
-  screen.move(x, y)
+-- PAGE 3: SPACE — reverb and distortion
+local function draw_page_space()
+  -- E2=reverb  E3=distortion
+  screen.level(4)
+  screen.move(2, 18)
   screen.font_size(8)
-  screen.text(label)
-  screen.level(2)
-  screen.rect(x + 10, y - 5, w, 3)
-  screen.fill()
+  screen.text("E2 reverb")
+  screen.move(68, 18)
+  screen.text("E3 distort")
+
+  -- LEFT: reverb column
+  local rev_mix = params:get("rev_mix")
+  local rev_time = params:get("rev_time")
+  local rev_size = params:get("rev_size")
+
+  screen.level(6)
+  screen.move(2, 29)
+  screen.font_size(7)
+  screen.text("MIX")
   screen.level(12)
-  screen.rect(x + 10, y - 5, math.floor(util.clamp(value, 0, 1) * w), 3)
-  screen.fill()
+  screen.move(24, 29)
+  screen.text(string.format("%.0f%%", rev_mix * 100))
+
+  screen.level(6)
+  screen.move(2, 38)
+  screen.text("TIME")
+  screen.level(12)
+  screen.move(24, 38)
+  screen.text(string.format("%.1fs", rev_time))
+
+  screen.level(6)
+  screen.move(2, 47)
+  screen.text("SIZE")
+  screen.level(12)
+  screen.move(24, 47)
+  screen.text(string.format("%.1f", rev_size))
+
+  -- RIGHT: distortion column
+  local drv = params:get("drive")
+  local ws = params:get("waveshape")
+  local fxs = params:get("fx_send")
+
+  screen.level(6)
+  screen.move(68, 29)
+  screen.text("DRIVE")
+  screen.level(12)
+  screen.move(100, 29)
+  screen.text(string.format("%.0f%%", drv * 100))
+
+  screen.level(6)
+  screen.move(68, 38)
+  screen.text("SHAPE")
+  screen.level(12)
+  screen.move(100, 38)
+  screen.text(string.format("%.0f%%", ws * 100))
+
+  screen.level(6)
+  screen.move(68, 47)
+  screen.text("GRIND")
+  screen.level(12)
+  screen.move(100, 47)
+  screen.text(string.format("%.0f%%", roughness * 100))
+
+  -- FX send bar at bottom
+  draw_bar("FX SEND", fxs, 2, 60, 60, 3)
+
+  -- Reverb viz: concentric rings (bottom right)
+  local rcx = 108
+  local rcy = 58
+  local rings = math.floor(rev_size * 2) + 1
+  for r = 1, rings do
+    local rr = 2 + r * 3
+    screen.level(math.max(1, math.floor(rev_mix * 8) - r + 1))
+    screen.circle(rcx, rcy, rr)
+    screen.stroke()
+  end
+end
+
+-- PAGE 4: CHAOS — the big three params + density
+local function draw_page_chaos()
+  -- E2=chaos  E3=mass
+  screen.level(4)
+  screen.move(2, 18)
+  screen.font_size(8)
+  screen.text("E2 chaos")
+  screen.move(68, 18)
+  screen.text("E3 mass")
+
+  -- Large param displays (2x2 grid)
+  draw_big_param("CHAOS", chaos * 100, "%.0f%%", 4, 30)
+  draw_big_param("MASS", mass / 1.5 * 100, "%.0f%%", 68, 30)
+  draw_big_param("GRIND", roughness * 100, "%.0f%%", 4, 50)
+  draw_big_param("DENSITY", density * 100, "%.0f%%", 68, 50)
+
+  -- Scale at bottom
+  screen.level(5)
+  screen.move(64, 63)
+  screen.font_size(7)
+  screen.text_center(SCALES[scale_idx] .. " / " ..
+    musicutil.note_num_to_name(scale_root, false))
 end
 
 function redraw()
@@ -1022,48 +1290,17 @@ function redraw()
   screen.font_face(1)
   screen.aa(0)
 
-  -- Title
-  screen.level(10)
-  screen.move(2, 7)
-  screen.font_size(8)
-  screen.text("ROTA")
+  draw_header()
 
-  -- Bandmate style / MANUAL
-  if bandmate_on then
-    screen.level(12)
-    screen.move(88, 7)
-    screen.font_size(8)
-    screen.text_right(BANDMATE_STYLES[bandmate_style].name)
-    local pulse = math.floor((math.sin(frame * 0.25) * 0.5 + 0.5) * 13) + 2
-    screen.level(pulse)
-    screen.circle(92, 4, 1.5)
-    screen.fill()
-  else
-    screen.level(4)
-    screen.move(92, 7)
-    screen.font_size(8)
-    screen.text_right("MANUAL")
+  if current_page == 1 then
+    draw_page_motors()
+  elseif current_page == 2 then
+    draw_page_rungler()
+  elseif current_page == 3 then
+    draw_page_space()
+  elseif current_page == 4 then
+    draw_page_chaos()
   end
-
-  -- Param bars
-  draw_param_bar("C", chaos, 2, 16, 26)
-  draw_param_bar("M", mass / 1.5, 2, 23, 26)
-  draw_param_bar("R", roughness, 2, 30, 26)
-
-  -- Density bar
-  draw_param_bar("D", density, 2, 37, 26)
-
-  -- Scale
-  screen.level(5)
-  screen.move(44, 37)
-  screen.font_size(7)
-  screen.text(SCALES[scale_idx])
-
-  -- Rungler arc
-  draw_rungler_arc()
-
-  -- Motor bars
-  draw_motor_bars()
 
   screen.update()
 end
@@ -1117,6 +1354,27 @@ function init()
     controlspec.new(0.5, 5, "lin", 0.1, 1.2, ""))
   params:set_action("rev_size", function(v)
     pcall(function() engine.rev_size(v) end)
+  end)
+
+  params:add_control("drive", "drive",
+    controlspec.new(0, 1, "lin", 0.01, 0.15, ""))
+  params:set_action("drive", function(v)
+    pcall(function() engine.drive(v) end)
+    screen_dirty = true
+  end)
+
+  params:add_control("waveshape", "waveshape",
+    controlspec.new(0, 1, "lin", 0.01, 0.45, ""))
+  params:set_action("waveshape", function(v)
+    pcall(function() engine.waveshape(v) end)
+    screen_dirty = true
+  end)
+
+  params:add_control("fx_send", "fx send",
+    controlspec.new(0, 1, "lin", 0.01, 0.4, ""))
+  params:set_action("fx_send", function(v)
+    pcall(function() engine.fx_send_all(v) end)
+    screen_dirty = true
   end)
 
   params:add_number("scale", "scale", 1, #SCALES, scale_idx)
