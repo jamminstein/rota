@@ -216,7 +216,40 @@ local BANDMATE_STYLES = {
     topology_mutate_prob = 0.03,
     voice_toggle_prob = 0.04,
   },
+  {
+    name = "CLOCKWORK",
+    chaos_lo = 0.15, chaos_hi = 0.5,
+    mass_lo  = 0.05, mass_hi  = 0.25,   -- low mass = snappy, rhythmic
+    rough_lo = 0.1,  rough_hi = 0.35,
+    density_lo = 0.6, density_hi = 0.95,
+    evolution_speed   = 0.04,
+    scale_change_prob = 0.02,
+    reverb_mix_target = 0.2,             -- dry = rhythmic clarity
+    reverb_time_target = 1.5,
+    reseed_prob       = 0.015,
+    topology_mutate_prob = 0.02,
+    voice_toggle_prob = 0.03,
+  },
+  {
+    name = "FREERUN",
+    chaos_lo = 0.3,  chaos_hi = 0.7,
+    mass_lo  = 0.5,  mass_hi  = 1.3,    -- heavy = floating, unmoored
+    rough_lo = 0.0,  rough_hi = 0.2,
+    density_lo = 0.3, density_hi = 0.7,
+    evolution_speed   = 0.02,
+    scale_change_prob = 0.04,
+    reverb_mix_target = 0.65,            -- wet = spacious
+    reverb_time_target = 8.0,
+    reseed_prob       = 0.01,
+    topology_mutate_prob = 0.02,
+    voice_toggle_prob = 0.02,
+  },
 }
+
+-- Style indices for special behavior
+local STYLE_STEREO    = 7
+local STYLE_CLOCKWORK = 8
+local STYLE_FREERUN   = 9
 
 local bandmate_on    = false
 local bandmate_style = 1
@@ -578,7 +611,7 @@ local function stereo_new_phase()
 end
 
 local function bandmate_evolve_stereo()
-  if bandmate_style ~= 7 then return end  -- only for STEREO style
+  if bandmate_style ~= STYLE_STEREO then return end  -- only for STEREO style
 
   stereo.phase_timer = stereo.phase_timer + 1
   if stereo.phase_timer >= stereo.phase_dur then
@@ -700,6 +733,68 @@ local function bandmate_evolve_stereo()
   end
 end
 
+-- CLOCKWORK: lock rungler to clock, snappy inertia, rhythmic gating
+-- FREERUN: decouple from clock, high inertia, drift freely
+local function bandmate_evolve_tempo()
+  if bandmate_style == STYLE_CLOCKWORK then
+    -- Force speed to 1.0 (locked to clock grid)
+    rungler.speed = 1.0
+    params:set("rungler_speed", 1.0, true)
+
+    -- Keep inertia low for snappy rhythm
+    for i = 1, NUM_VOICES do
+      motors[i].inertia = math.max(0.03, mass * 0.3)
+      pcall(function() engine.inertia(i - 1, motors[i].inertia) end)
+    end
+
+    -- High density, uniform gate lengths for groove feel
+    density = util.clamp(density, 0.6, 0.95)
+
+    -- Occasionally create rhythmic patterns: mute specific voices
+    -- to create a repeating 4-step or 8-step feel
+    if math.random() < 0.04 then
+      local pattern = math.random(1, 4)
+      if pattern == 1 then
+        -- Kick-hat pattern: bass on, high alternating
+        motors[1].on = true; motors[2].on = true
+        motors[6].on = true; motors[7].on = false; motors[8].on = true
+      elseif pattern == 2 then
+        -- Sparse: just bass + one mid
+        for i = 1, NUM_VOICES do motors[i].on = (i <= 2 or i == 4) end
+      elseif pattern == 3 then
+        -- Full: all on
+        for i = 1, NUM_VOICES do motors[i].on = true end
+      elseif pattern == 4 then
+        -- Odd voices only (creates stereo patterns with default panning)
+        for i = 1, NUM_VOICES do motors[i].on = (i % 2 == 1) end
+      end
+    end
+
+  elseif bandmate_style == STYLE_FREERUN then
+    -- Drift rungler speed slowly, disconnected from clock grid
+    local speed_target = 0.3 + math.sin(bandmate_phase * 0.15) * 2.5
+    speed_target = math.max(0.15, speed_target)
+    rungler.speed = rungler.speed + (speed_target - rungler.speed) * 0.02
+    params:set("rungler_speed", rungler.speed, true)
+
+    -- High inertia: notes float and slide
+    for i = 1, NUM_VOICES do
+      local base_inertia = 0.5 + math.sin(bandmate_phase * 0.08 + i * 0.9) * 0.4
+      motors[i].inertia = math.max(0.3, base_inertia)
+      pcall(function() engine.inertia(i - 1, motors[i].inertia) end)
+    end
+
+    -- Longer gate lengths: let notes ring and overlap
+    -- (we can't change VOICE_ROLES at runtime, but we can keep gates
+    -- from closing by resetting the counter when it's about to expire)
+    for i = 1, NUM_VOICES do
+      if motors[i].gated and motors[i].gate_counter == 1 and math.random() < 0.4 then
+        motors[i].gate_counter = motors[i].gate_counter + VOICE_ROLES[i].gate_len
+      end
+    end
+  end
+end
+
 local function bandmate_evolve_reverb()
   local s = get_style()
   local cur_mix = params:get("rev_mix")
@@ -817,6 +912,7 @@ local function setup_lattice()
           bandmate_mutate_topology()
           bandmate_maybe_reseed()
           bandmate_evolve_stereo()
+          bandmate_evolve_tempo()
         end
       end)
     end,
@@ -1161,7 +1257,7 @@ local function draw_header()
   if bandmate_on then
     local sname = BANDMATE_STYLES[bandmate_style].name
     -- Show stereo phase when in STEREO mode
-    if bandmate_style == 7 and stereo.phase then
+    if bandmate_style == STYLE_STEREO and stereo.phase then
       sname = sname .. ":" .. STEREO_PHASES[stereo.phase].name
     end
     screen.level(10)
