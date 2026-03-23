@@ -396,11 +396,17 @@ local grid_metro   = nil
 -- -----------------------------------------------------------------------
 
 local function rebuild_scale()
+  scale_idx = util.clamp(scale_idx, 1, #SCALES)
+  scale_root = util.clamp(scale_root, 12, 72)
   scale_notes = musicutil.generate_scale(scale_root, SCALES[scale_idx], 6)
 end
 
 local function quantize_midi(midi_note)
   if not quantize then return midi_note end
+  if not scale_notes or #scale_notes == 0 then
+    rebuild_scale()
+    if not scale_notes or #scale_notes == 0 then return midi_note end
+  end
   return musicutil.snap_note_to_array(midi_note, scale_notes)
 end
 
